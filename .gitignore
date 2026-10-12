@@ -1,0 +1,9 @@
+build/
+*.dll
+*.pdb
+*.obj
+*.lib
+*.exp
+*.log
+*.state
+*.state.tmp

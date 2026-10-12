@@ -1,0 +1,55 @@
+#include "../src/EventRules.h"
+#include <cassert>
+#include <cstdio>
+
+int main() {
+    using namespace encounters;
+    assert(floorDivide(-1, 64) == -1 && floorDivide(-64, 64) == -1);
+    assert(floorDivide(-65, 64) == -2 && floorDivide(65, 64) == 1);
+    unsigned seen[unsigned(Kind::Count)]{};
+    for (int x = -12; x <= 12; ++x)
+        for (int y = -12; y <= 12; ++y) {
+            Region region{x, y};
+            auto initial = plan(12345, region, 0, 0);
+            auto reload = plan(12345, region, 0, 0);
+            assert(initial.site.x == reload.site.x && initial.site.y == reload.site.y);
+            for (unsigned cycle = 0; cycle < 20; ++cycle) {
+                auto p = plan(12345, region, 0, cycle);
+                assert(p.site.x >= int64_t(x) * 1024 + 64);
+                assert(p.site.x < int64_t(x + 1) * 1024 - 64);
+                assert(p.site.y >= int64_t(y) * 1024 + 64);
+                assert(p.site.y < int64_t(y + 1) * 1024 - 64);
+                ++seen[unsigned(p.kind)];
+                assert(p.enemies <= 6);
+                if (p.kind == Kind::Battle)
+                    assert(p.enemies >= 4);
+                if (p.kind == Kind::ChestSack)
+                    assert(p.enemies == 0);
+                unsigned mask = 0;
+                for (unsigned enemy = 0; enemy < p.enemies; ++enemy) {
+                    assert(!objectiveComplete(p.enemies, mask));
+                    mask |= 1u << enemy;
+                }
+                assert(objectiveComplete(p.enemies, mask) == (p.enemies > 0));
+                if (cycle) {
+                    bool found = false;
+                    for (unsigned attempt = 0; attempt < 16; ++attempt)
+                        found |= relocating(plan(12345, region, 0, cycle, attempt).site,
+                                            initial.site, cycle);
+                    assert(found);
+                }
+            }
+        }
+    for (auto count : seen)
+        assert(count > 1000);
+    assert(!objectiveComplete(0, 0xff) && !objectiveComplete(7, 0xff));
+    auto deadline = cooldownDeadline(1000, 120);
+    assert(deadline == 8200);
+    assert(!canRestart(deadline - 1, deadline, 1000));
+    assert(!canRestart(deadline, deadline, 0));
+    assert(!canRestart(deadline, deadline, deadline - 59));
+    assert(canRestart(deadline, deadline, deadline - 60));
+    assert(!canRestart(100, 90, 101));
+    assert(stars(2, false) == 2 && stars(2, true) == 3 && stars(100, true) == 4);
+    puts("Regional relocation, stable active plans, enemy caps, objectives and cooldown: PASS");
+}
