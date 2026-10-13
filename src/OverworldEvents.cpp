@@ -305,11 +305,16 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
         spawnActor(value, active, Object, points[Object], *value.assets.cageRace, 7, 0);
     if (saved.kind == Kind::ChestSack) {
         auto sack =
-            spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 3, 0);
+            spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 8, 0);
         if (sack) {
+            // Native examination objects are excluded from combat targeting and
+            // NPC health UI. Keep only positive liveness; this sack carries no gear.
+            std::memset(&sack->entity_data.equipment, 0, sizeof(sack->entity_data.equipment));
+            sack->entity_data.HP = 1.f;
             sack->entity_data.appearance.flags2 =
-                (sack->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) |
-                Friendly;
+                sack->entity_data.appearance.flags2 &
+                ~(CanPickup | Petrified | Friendly | Named | Mini | Boss);
+            sack->entity_data.interaction_state = 1;
             sack->entity_data.binary_toggles |= MapMarker;
         }
     }
