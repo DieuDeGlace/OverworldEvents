@@ -64,6 +64,8 @@ Type one command in chat while on dry, open overworld terrain:
 /events test chest-boss
 ```
 
-These optional commands find an eligible site nearby and print its coordinates. They retain POI/terrain checks, active caps and the normal progress/cooldown rules, and never replace a started/completed event. An unused regional slot is required. `/events status` writes dependency/asset/active-state information to `Mods/OverworldEvents.log`.
+These optional commands find an eligible site nearby and print its distance from you. Follow the native chest/NPC/guardian marker on the map; raw engine block coordinates are written only to the log, because they differ from the HUD coordinate format. Markers disappear after reward delivery or event failure. The commands retain POI/terrain checks, active caps and the normal progress/cooldown rules, and never replace a started/completed event. An unused regional slot is required. `/events status` writes dependency/asset/active-state information to `Mods/OverworldEvents.log`.
+
+Placement checks only the positions actually used by each encounter. A sack/chest pair does not need clear, level terrain at unused enemy/companion offsets. Rescue cages still require their complete, flat 7×7 footprint.
 
 Check native enemy movement and damage, friendly combat, cage clearance/removal, NPC reward delivery, sack keys and locked-chest consumption. Leave the area, return, and restart the game to check progress persistence. Dungeon verification requires revisiting an original equipment site after its chunks reload. Single-player/host operation is supported by the implementation; multiplayer synchronization is not yet verified.

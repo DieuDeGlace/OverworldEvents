@@ -25,6 +25,7 @@ constexpr unsigned Named = 1u << 9, NoTalk = 1u << 13, CanPickup = 1u << 14, Fri
                    Mini = 1u << 17, Boss = 1u << 18, Petrified = 1u << 22;
 constexpr unsigned Npc = 6, Companion = 7, Object = 8, Container = 9;
 constexpr unsigned ActorCount = 10;
+constexpr short MapMarker = 1 << 8;
 struct Bridge {
     cube::Creature *(*spawn)(const LongVector3 *, const IntVector2 *, int, int, int) = nullptr;
     void (*drop)(cube::Game *, cube::Creature *, const cube::Item *, cube::Creature *) = nullptr;
@@ -200,6 +201,17 @@ static bool footprint(cube::World *world, Site site, int &height, int radius, bo
 }
 static const Site offsets[ActorCount] = {{-8, -7}, {8, -7}, {-10, 5}, {10, 5}, {-5, 12},
                                          {5, 12},  {0, 0},  {-3, 2},  {0, 0},  {10, -3}};
+static bool needsPosition(const EventRecord &saved, unsigned index) {
+    if (index < Npc)
+        return index < saved.enemyCount && !(saved.defeatedMask & (1u << index));
+    if (index == Npc)
+        return !chestEvent(saved.kind);
+    if (index == Companion)
+        return saved.kind == Kind::Battle;
+    if (index == Object)
+        return chestEvent(saved.kind) || (saved.kind == Kind::Rescue && !saved.objectiveDone);
+    return saved.kind == Kind::ChestSack; // Separate sack offset.
+}
 static bool place(cube::Game *game, EventRecord &saved,
                   std::array<LongVector3, ActorCount> &points) {
     int center = 0;
@@ -208,6 +220,8 @@ static bool place(cube::Game *game, EventRecord &saved,
                    saved.kind == Kind::Rescue))
         return false;
     for (unsigned actor = 0; actor < ActorCount; ++actor) {
+        if (!needsPosition(saved, actor))
+            continue;
         auto offset = offsets[actor];
         // The native hostile/NPC aggro radius is 20 blocks. A guardian starts
         // farther from the quest giver/prisoner, who stays at the event center.
@@ -259,6 +273,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             (npc->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) | Friendly;
         npc->entity_data.HP = native::maximumHP(npc) * std::max(.05f, saved.npcHPFraction);
         snprintf(npc->entity_data.name, 16, "%s", "Adventurer");
+        npc->entity_data.binary_toggles |= MapMarker;
         if (saved.kind == Kind::Battle)
             native::allowRoaming(npc);
     }
@@ -281,6 +296,8 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
         native::allowRoaming(creature);
         if (saved.kind != Kind::Battle)
             nameBoss(creature, roll);
+        if (saved.kind != Kind::Battle)
+            creature->entity_data.binary_toggles |= MapMarker;
         creature->entity_data.HP =
             native::maximumHP(creature) * std::clamp(saved.enemyHPFraction[enemy], .01f, 1.f);
     }
@@ -289,17 +306,20 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     if (saved.kind == Kind::ChestSack) {
         auto sack =
             spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 3, 0);
-        if (sack)
+        if (sack) {
             sack->entity_data.appearance.flags2 =
                 (sack->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) |
                 Friendly;
+            sack->entity_data.binary_toggles |= MapMarker;
+        }
     }
     if (chestEvent(saved.kind)) {
         auto chest =
             spawnActor(value, active, Container, points[Object], value.assets.chestRace, 8, 0);
         if (chest) {
             chest->entity_data.interaction_state = saved.rewardClaimed ? 2 : 1;
-            chest->entity_data.binary_toggles &= ~(1 << 8);
+            if (!saved.rewardClaimed)
+                chest->entity_data.binary_toggles |= MapMarker;
         }
     }
     bool complete =
@@ -364,6 +384,10 @@ static void update(Data &value, cube::Game *game, Site player) {
             continue;
         }
         auto &saved = record(value, it->key);
+        if (saved.rewardClaimed || saved.failed)
+            for (auto id : it->actors)
+                if (auto actor = native::resident(game->host.world, id))
+                    actor->entity_data.binary_toggles &= ~MapMarker;
         if (!it->retiring)
             for (unsigned index = 0; index <= Npc; ++index)
                 if (auto creature = native::resident(game->host.world, it->actors[index]))
@@ -420,7 +444,7 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
         candidate.enemyCount = enemyCount(candidate.kind, roll);
         if (!relocating(candidate.site, candidate.previousSite, candidate.cycle))
             continue;
-        std::array<LongVector3, ActorCount> points;
+        std::array<LongVector3, ActorCount> points{};
         {
             native::ZoneLock locked(game->world);
             if (!locked.held)
@@ -444,10 +468,15 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
         value.dirty = true;
         bool started = spawn(value, game, *selected, points);
         wchar_t message[180];
-        swprintf_s(message,
-                   L"%s Event site: %lld, %lld. Progress follows the normal cooldown rules.",
-                   started ? L"Test encounter started." : L"Native spawn needs a retry.",
-                   candidate.site.x, candidate.site.y);
+        auto dx = double(candidate.site.x - player.x), dy = double(candidate.site.y - player.y);
+        swprintf_s(message, L"%s %.0f blocks away. Look for the chest or NPC marker on your map.",
+                   started ? L"Test encounter started" : L"Native spawn needs a retry",
+                   std::hypot(dx, dy));
+        char debugSite[180];
+        snprintf(debugSite, sizeof(debugSite),
+                 "Test kind=%u at engine blocks %lld,%lld; spawned=%d", unsigned(candidate.kind),
+                 candidate.site.x, candidate.site.y, started);
+        log(debugSite);
         say(message);
         value.requestedTest = Kind::Count;
         return;
@@ -579,7 +608,7 @@ static void tick(cube::Game *game) {
                         saved.kind = planned.kind;
                         saved.enemyCount = planned.enemies;
                     }
-                    std::array<LongVector3, ActorCount> points;
+                    std::array<LongVector3, ActorCount> points{};
                     if (!place(game, saved, points)) {
                         if (!saved.planned)
                             nextCandidate(saved);
@@ -696,8 +725,11 @@ static int interaction(cube::Game *game, cube::Creature *creature) {
         if (actor == Container && chestEvent(saved.kind)) {
             auto open = [&] {
                 creature->entity_data.interaction_state = 2;
-                if (auto host = native::resident(game->host.world, active.actors[Container]))
+                creature->entity_data.binary_toggles &= ~MapMarker;
+                if (auto host = native::resident(game->host.world, active.actors[Container])) {
                     host->entity_data.interaction_state = 2;
+                    host->entity_data.binary_toggles &= ~MapMarker;
+                }
             };
             if (saved.objectiveDone) {
                 if (deliver(value, game, saved, active)) {
