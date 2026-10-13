@@ -186,14 +186,14 @@ static bool available(const Assets &assets, Kind kind) {
         return false;
     return kind != Kind::ChestSack || bool(assets.sackRace);
 }
-static bool footprint(cube::World *world, Site site, int &height, int radius) {
+static bool footprint(cube::World *world, Site site, int &height, int radius, bool flat) {
     if (!native::ground(world, site, height, 8))
         return false;
-    for (int x = -radius; x <= radius; x += std::max(1, radius))
-        for (int y = -radius; y <= radius; y += std::max(1, radius)) {
+    for (int x = -radius; x <= radius; ++x)
+        for (int y = -radius; y <= radius; ++y) {
             int other = 0;
             if (!native::ground(world, {site.x + x, site.y + y}, other, 8) ||
-                abs(other - height) > 1)
+                abs(other - height) > (flat ? 0 : 1))
                 return false;
         }
     return true;
@@ -204,7 +204,8 @@ static bool place(cube::Game *game, EventRecord &saved,
                   std::array<LongVector3, ActorCount> &points) {
     int center = 0;
     if (!native::overworld(game->world, saved.site, saved.region) ||
-        !footprint(game->world, saved.site, center, saved.kind == Kind::Rescue ? 3 : 1))
+        !footprint(game->world, saved.site, center, saved.kind == Kind::Rescue ? 3 : 1,
+                   saved.kind == Kind::Rescue))
         return false;
     for (unsigned actor = 0; actor < ActorCount; ++actor) {
         auto offset = offsets[actor];
