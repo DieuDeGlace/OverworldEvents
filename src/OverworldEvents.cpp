@@ -5,6 +5,7 @@
 #include "NativeWorld.h"
 #include "RuntimeAssets.h"
 #include "StateStore.h"
+#include "TravelLocations.h"
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -20,8 +21,8 @@ cube::Item::Item() {
 
 namespace eventmod {
 using namespace encounters;
-constexpr unsigned Named = 1u << 9, NoTalk = 1u << 13, Friendly = 1u << 15, Mini = 1u << 17,
-                   Boss = 1u << 18;
+constexpr unsigned Named = 1u << 9, NoTalk = 1u << 13, CanPickup = 1u << 14, Friendly = 1u << 15,
+                   Mini = 1u << 17, Boss = 1u << 18, Petrified = 1u << 22;
 constexpr unsigned Npc = 6, Companion = 7, Object = 8, Container = 9;
 constexpr unsigned ActorCount = 10;
 struct Bridge {
@@ -37,6 +38,10 @@ struct Active {
     std::array<uint64_t, ActorCount> actors{};
     bool retiring = false;
 };
+struct SpawnRequest {
+    EventKey key;
+    std::array<LongVector3, ActorCount> points;
+};
 struct Data {
     std::recursive_mutex gate;
     StateStore state;
@@ -47,6 +52,8 @@ struct Data {
     uint64_t world = 0, nextTick = 0;
     bool enabled = true, dirty = false, loaded = false, assetLog = false;
     unsigned slots = 3, cap = 2, cooldown = 120;
+    Kind requestedTest = Kind::Count;
+    unsigned testAttempt = 0;
 };
 static Data &data() {
     static Data value;
@@ -136,13 +143,20 @@ static float fraction(cube::Creature *creature) {
 static bool sameRegion(Region a, Region b) {
     return a.x == b.x && a.y == b.y;
 }
+static void nextCandidate(EventRecord &saved) {
+    // Tentative positions may be discarded while exploring; only an activated
+    // encounter is fixed/persisted. Keep the counter inside the state bounds.
+    saved.attempt = (saved.attempt + 1) & 0xffffu;
+}
 static std::vector<cube::Creature *> enemies(cube::Game *game, Region region, const Data &value) {
     std::vector<cube::Creature *> pool;
     for (auto creature : game->host.world.creatures) {
         if (!creature || owned(value, uint64_t(creature->id)))
             continue;
         auto &entity = creature->entity_data;
-        if (entity.hostility_type != 1 || entity.HP <= 0 ||
+        // Wraiths use a native home-position teleport route not initialized by
+        // the common factory. Exclude that race rather than spawning it at 0,0.
+        if (entity.hostility_type != 1 || entity.HP <= 0 || entity.race == 276 ||
             (entity.appearance.flags2 & (Named | Friendly | Mini | Boss)))
             continue;
         auto actual = native::region(game->world, native::position(creature));
@@ -168,7 +182,7 @@ static bool available(const Assets &assets, Kind kind) {
         return false;
     if (kind == Kind::Rescue && !assets.cageRace)
         return false;
-    if (chestEvent(kind) && (!assets.keyCategory || !assets.keyId || *assets.keyCategory != 24))
+    if (chestEvent(kind) && (!assets.keyCategory || !assets.keyId || *assets.keyCategory != 22))
         return false;
     return kind != Kind::ChestSack || bool(assets.sackRace);
 }
@@ -193,7 +207,12 @@ static bool place(cube::Game *game, EventRecord &saved,
         !footprint(game->world, saved.site, center, saved.kind == Kind::Rescue ? 3 : 1))
         return false;
     for (unsigned actor = 0; actor < ActorCount; ++actor) {
-        Site point{saved.site.x + offsets[actor].x, saved.site.y + offsets[actor].y};
+        auto offset = offsets[actor];
+        // The native hostile/NPC aggro radius is 20 blocks. A guardian starts
+        // farther from the quest giver/prisoner, who stays at the event center.
+        if (actor == 0 && saved.kind != Kind::Battle)
+            offset = {36, 0};
+        Site point{saved.site.x + offset.x, saved.site.y + offset.y};
         int height = 0;
         if (!native::ground(game->world, point, height, 5) || abs(height - center) > 3 ||
             !native::overworld(game->world, point, saved.region))
@@ -230,19 +249,26 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
                            ? -1
                            : value.assets.npcRaces[roll % value.assets.npcRaces.size()];
     if (!chestEvent(saved.kind)) {
-        auto npc = spawnActor(value, active, Npc, points[Npc], friendlyRace,
-                              saved.kind == Kind::Battle ? 3 : 4, 2);
+        // The native behaviour-3 talk branch reaches CubeMega's existing hook.
+        // Behaviour 4 follows a separate path and cannot deliver event dialogue.
+        auto npc = spawnActor(value, active, Npc, points[Npc], friendlyRace, 3, 2);
         if (!npc)
             return false;
         npc->entity_data.appearance.flags2 =
-            (npc->entity_data.appearance.flags2 & ~NoTalk) | Friendly;
+            (npc->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) | Friendly;
         npc->entity_data.HP = native::maximumHP(npc) * std::max(.05f, saved.npcHPFraction);
         snprintf(npc->entity_data.name, 16, "%s", "Adventurer");
+        if (saved.kind == Kind::Battle)
+            native::allowRoaming(npc);
     }
     if (saved.kind == Kind::Battle) {
         auto ally = spawnActor(value, active, Companion, points[Companion], friendlyRace, 3, 1);
-        if (ally)
-            ally->entity_data.appearance.flags2 |= Friendly;
+        if (ally) {
+            ally->entity_data.appearance.flags2 =
+                (ally->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) |
+                Friendly;
+            native::allowRoaming(ally);
+        }
     }
     for (unsigned enemy = 0; enemy < saved.enemyCount; ++enemy) {
         if (saved.defeatedMask & (1u << enemy))
@@ -251,6 +277,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
                                    saved.enemyStars[enemy]);
         if (!creature)
             continue;
+        native::allowRoaming(creature);
         if (saved.kind != Kind::Battle)
             nameBoss(creature, roll);
         creature->entity_data.HP =
@@ -260,10 +287,11 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
         spawnActor(value, active, Object, points[Object], *value.assets.cageRace, 7, 0);
     if (saved.kind == Kind::ChestSack) {
         auto sack =
-            spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 4, 0);
+            spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 3, 0);
         if (sack)
             sack->entity_data.appearance.flags2 =
-                (sack->entity_data.appearance.flags2 & ~NoTalk) | Friendly;
+                (sack->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) |
+                Friendly;
     }
     if (chestEvent(saved.kind)) {
         auto chest =
@@ -352,6 +380,82 @@ static void update(Data &value, cube::Game *game, Site player) {
         ++it;
     }
 }
+static void testEncounter(Data &value, cube::Game *game, Site player, Region region) {
+    if (value.requestedTest == Kind::Count)
+        return;
+    auto say = [&](const wchar_t *text) {
+        value.bridge.dialogue(game, game->world->local_creature, text);
+    };
+    if (value.active.size() >= value.cap) {
+        say(L"Event limit reached. Move away from the active encounters before testing another.");
+        value.requestedTest = Kind::Count;
+        return;
+    }
+    if (!available(value.assets, value.requestedTest)) {
+        say(L"The native assets needed for that event are unavailable.");
+        value.requestedTest = Kind::Count;
+        return;
+    }
+    EventRecord *selected = nullptr;
+    for (unsigned slot = 0; slot < value.slots; ++slot) {
+        auto &saved = value.state.get(value.world, region, slot);
+        if (!saved.planned && !saved.rewardClaimed && !saved.failed) {
+            selected = &saved;
+            break;
+        }
+    }
+    if (!selected) {
+        say(L"This region has no unused event slot. Try testing in another region.");
+        value.requestedTest = Kind::Count;
+        return;
+    }
+    // Two candidate checks per tick, using the same restrictions as natural
+    // encounters. A test never replaces an active or completed encounter.
+    for (unsigned search = 0; search < 2 && value.testAttempt < 32; ++search) {
+        auto candidate = *selected;
+        candidate.kind = value.requestedTest;
+        candidate.site = testSite(player, value.testAttempt++);
+        auto roll = plan(value.world, region, candidate.slot, candidate.cycle).roll;
+        candidate.enemyCount = enemyCount(candidate.kind, roll);
+        if (!relocating(candidate.site, candidate.previousSite, candidate.cycle))
+            continue;
+        std::array<LongVector3, ActorCount> points;
+        {
+            native::ZoneLock locked(game->world);
+            if (!locked.held)
+                return;
+            if (!place(game, candidate, points))
+                continue;
+            if (candidate.enemyCount) {
+                auto pool = enemies(game, region, value);
+                if (pool.empty())
+                    continue;
+                for (unsigned index = 0; index < candidate.enemyCount; ++index) {
+                    auto pick = pool[mix(roll + index) % pool.size()];
+                    candidate.enemyRaces[index] = pick->entity_data.race;
+                    candidate.enemyStars[index] =
+                        stars(int(pick->entity_data.level), candidate.kind != Kind::Battle);
+                }
+            }
+        }
+        candidate.planned = true;
+        *selected = candidate;
+        value.dirty = true;
+        bool started = spawn(value, game, *selected, points);
+        wchar_t message[180];
+        swprintf_s(message,
+                   L"%s Event site: %lld, %lld. Progress follows the normal cooldown rules.",
+                   started ? L"Test encounter started." : L"Native spawn needs a retry.",
+                   candidate.site.x, candidate.site.y);
+        say(message);
+        value.requestedTest = Kind::Count;
+        return;
+    }
+    if (value.testAttempt >= 32) {
+        say(L"No eligible dry overworld site found nearby. Move away from POIs or find open terrain.");
+        value.requestedTest = Kind::Count;
+    }
+}
 static void tick(cube::Game *game) {
     auto &value = data();
     std::lock_guard<std::recursive_mutex> guard(value.gate);
@@ -361,6 +465,7 @@ static void tick(cube::Game *game) {
             flush(value);
         value.session = nullptr;
         value.active.clear();
+        value.requestedTest = Kind::Count;
         return;
     }
     auto nowTick = GetTickCount64();
@@ -374,6 +479,7 @@ static void tick(cube::Game *game) {
         value.world = identity;
         value.assets = {};
         value.assetLog = false;
+        travel::clearCache();
     }
     if (!value.loaded) {
         std::string error;
@@ -389,7 +495,7 @@ static void tick(cube::Game *game) {
     if (!connect(value.bridge))
         return;
     if (!value.assets.ready)
-        value.assets = resolveAssets(game);
+        value.assets = resolveAssets(game->speech);
     if (!value.assets.ready)
         return;
     if (!value.assetLog) {
@@ -406,6 +512,9 @@ static void tick(cube::Game *game) {
     auto now = utc();
     update(value, game, player);
     unsigned searches = 0;
+    bool testing = value.requestedTest != Kind::Count;
+    testEncounter(value, game, player, region);
+    std::vector<SpawnRequest> pending;
     {
         native::ZoneLock locked(game->world);
         if (!locked.held)
@@ -418,6 +527,9 @@ static void tick(cube::Game *game) {
                         !value.state.find(value.world, area, slot))
                         continue;
                     auto &saved = value.state.get(value.world, area, slot);
+                    bool exists = false;
+                    for (const auto &active : value.active)
+                        exists |= active.key == EventKey{value.world, area, slot};
                     if (saved.rewardClaimed || saved.failed) {
                         if (within(player, saved.site, 256)) {
                             if (saved.emptySince) {
@@ -428,7 +540,7 @@ static void tick(cube::Game *game) {
                             saved.emptySince = now;
                             value.dirty = true;
                         }
-                        if (!canRestart(now, saved.deadlineUTCsecs, saved.emptySince))
+                        if (exists || !canRestart(now, saved.deadlineUTCsecs, saved.emptySince))
                             continue;
                         auto previous = saved.site;
                         auto cycle = saved.cycle + 1;
@@ -440,24 +552,26 @@ static void tick(cube::Game *game) {
                         saved.previousSite = previous;
                         value.dirty = true;
                     }
-                    if (value.active.size() >= value.cap)
+                    if (testing || value.active.size() + pending.size() >= value.cap)
                         continue;
-                    bool exists = false;
-                    for (const auto &active : value.active)
-                        exists |= active.key == EventKey{value.world, area, slot};
                     if (exists)
                         continue;
                     auto planned = plan(value.world, area, slot, saved.cycle, saved.attempt);
                     auto site = saved.planned ? saved.site : planned.site;
                     if (!native::coordinate(site) || !within(player, site, 192) ||
-                        within(player, site, 48) || searches >= 2)
+                        (!saved.planned && within(player, site, 48))) {
+                        if (!saved.planned)
+                            nextCandidate(saved);
+                        continue;
+                    }
+                    if (searches >= 2)
                         continue;
                     if (!available(value.assets, saved.planned ? saved.kind : planned.kind))
                         continue;
                     ++searches;
                     if (!saved.planned) {
                         if (!relocating(site, saved.previousSite, saved.cycle)) {
-                            ++saved.attempt;
+                            nextCandidate(saved);
                             continue;
                         }
                         saved.site = site;
@@ -467,7 +581,7 @@ static void tick(cube::Game *game) {
                     std::array<LongVector3, ActorCount> points;
                     if (!place(game, saved, points)) {
                         if (!saved.planned)
-                            ++saved.attempt;
+                            nextCandidate(saved);
                         continue;
                     }
                     if (!saved.planned && saved.enemyCount) {
@@ -483,9 +597,13 @@ static void tick(cube::Game *game) {
                     }
                     saved.planned = true;
                     value.dirty = true;
-                    spawn(value, game, saved, points);
+                    pending.push_back({{saved.world, saved.region, saved.slot}, points});
                 }
     }
+    // Construct native actors only after releasing terrain locks. Appearance,
+    // dialogue and host registration can enter other engine subsystems.
+    for (const auto &request : pending)
+        spawn(value, game, record(value, request.key), request.points);
     flush(value);
 }
 static void death(cube::Game *game, cube::Creature *creature) {
@@ -499,7 +617,8 @@ static void death(cube::Game *game, cube::Creature *creature) {
         auto &saved = record(value, active.key);
         if (saved.failed || saved.rewardClaimed)
             continue;
-        if (active.actors[Npc] == uint64_t(creature->id) && !saved.rewardClaimed) {
+        if (active.actors[Npc] && active.actors[Npc] == uint64_t(creature->id) &&
+            !saved.rewardClaimed) {
             saved.failed = true;
             saved.deadlineUTCsecs = cooldownDeadline(utc(), value.cooldown);
             saved.emptySince = 0;
@@ -567,7 +686,7 @@ static int interaction(cube::Game *game, cube::Creature *creature) {
         }
         if (actor == Object && saved.kind == Kind::ChestSack) {
             if (!saved.objectiveDone && grantKey(value, game, saved))
-                say(L"You found a key in the sack.");
+                say(L"You have the key for this chest.");
             else
                 say(L"The sack is empty.");
             flush(value);
@@ -642,8 +761,40 @@ static void initialize() {
     value.slots = unsigned(std::clamp(setting(L"EventsPerRegion", 3), 1, 8));
     value.cap = unsigned(std::clamp(setting(L"ActiveEventCap", 2), 1, 3));
     value.cooldown = unsigned(std::clamp(setting(L"CooldownMinutes", 120), 30, 1440));
+    if (value.enabled && setting(L"ReplaceTravelLocations", 1)) {
+        std::string error;
+        if (!travel::initialize(&error))
+            log(error.c_str());
+        else
+            log("Original glider/boat/reins/boots sites now generate native dungeons.");
+    }
     log(value.enabled ? "OverworldEvents initialized; native assets resolved on world entry."
                       : "OverworldEvents disabled or unsupported Steam executable.");
+}
+static int chat(std::wstring *message) {
+    if (!message || message->compare(0, 7, L"/events") != 0)
+        return 0;
+    auto &value = data();
+    std::lock_guard<std::recursive_mutex> guard(value.gate);
+    const wchar_t *commands[] = {L"/events test battle", L"/events test rescue",
+                                 L"/events test bounty", L"/events test chest-sack",
+                                 L"/events test chest-boss"};
+    for (unsigned index = 0; index < unsigned(Kind::Count); ++index)
+        if (*message == commands[index]) {
+            value.requestedTest = Kind(index);
+            value.testAttempt = 0;
+            return 1;
+        }
+    if (*message == L"/events status") {
+        char status[180];
+        snprintf(status, sizeof(status),
+                 "Status: enabled=%d bridge=%d assets=%d active=%zu records=%zu", value.enabled,
+                 value.bridge.spawn != nullptr, value.assets.ready, value.active.size(),
+                 value.state.size());
+        log(status);
+        return 1;
+    }
+    return 0;
 }
 } // namespace eventmod
 
@@ -655,10 +806,14 @@ class OverworldEvents : public GenericMod {
     void OnGameTick(cube::Game *game) override {
         eventmod::tick(game);
     }
+    int OnChat(std::wstring *message) override {
+        return eventmod::chat(message);
+    }
     void OnCreatureDeath(cube::Game *game, cube::Creature *creature, cube::Creature *) override {
         eventmod::death(game, creature);
     }
 };
+static_assert(sizeof(GenericMod) == 0x428, "CubeModLoader API 7.3 layout");
 EXPORT GenericMod *MakeMod() {
     return new OverworldEvents();
 }

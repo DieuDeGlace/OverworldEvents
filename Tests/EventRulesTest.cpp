@@ -15,10 +15,10 @@ int main() {
             assert(initial.site.x == reload.site.x && initial.site.y == reload.site.y);
             for (unsigned cycle = 0; cycle < 20; ++cycle) {
                 auto p = plan(12345, region, 0, cycle);
-                assert(p.site.x >= int64_t(x) * 1024 + 64);
-                assert(p.site.x < int64_t(x + 1) * 1024 - 64);
-                assert(p.site.y >= int64_t(y) * 1024 + 64);
-                assert(p.site.y < int64_t(y + 1) * 1024 - 64);
+                assert(p.site.x >= int64_t(x) * RegionBlocks + 64);
+                assert(p.site.x < int64_t(x + 1) * RegionBlocks - 64);
+                assert(p.site.y >= int64_t(y) * RegionBlocks + 64);
+                assert(p.site.y < int64_t(y + 1) * RegionBlocks - 64);
                 ++seen[unsigned(p.kind)];
                 assert(p.enemies <= 6);
                 if (p.kind == Kind::Battle)
@@ -51,5 +51,11 @@ int main() {
     assert(canRestart(deadline, deadline, deadline - 60));
     assert(!canRestart(100, 90, 101));
     assert(stars(2, false) == 2 && stars(2, true) == 3 && stars(100, true) == 4);
+    assert(enemyCount(Kind::ChestSack, 100) == 0 && enemyCount(Kind::Bounty, 100) == 1);
+    for (unsigned index = 0; index < 32; ++index) {
+        auto site = testSite({-105694681, 64965890}, index);
+        assert(within(site, {-105694681, 64965890}, 192));
+        assert(!within(site, {-105694681, 64965890}, 48));
+    }
     puts("Regional relocation, stable active plans, enemy caps, objectives and cooldown: PASS");
 }

@@ -1,6 +1,6 @@
 #pragma once
-#include "cwsdk.h"
 #include <climits>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,7 +16,8 @@ struct Assets {
     std::wstring keyName;
 };
 
-inline std::optional<int> entityAsset(const cube::Speech &speech, const wchar_t *name) {
+template <class Speech>
+inline std::optional<int> entityAsset(const Speech &speech, const wchar_t *name) {
     std::optional<int> result;
     for (const auto &entry : speech.entity_type_id_map) {
         if (entry.first < 0 || entry.second != name)
@@ -29,11 +30,8 @@ inline std::optional<int> entityAsset(const cube::Speech &speech, const wchar_t 
     return result;
 }
 
-inline Assets resolveAssets(cube::Game *game) {
+template <class Speech> inline Assets resolveAssets(const Speech &speech) {
     Assets assets;
-    if (!game)
-        return assets;
-    const auto &speech = game->speech;
     if (speech.entity_type_id_map.empty() || speech.item_identifier_map.empty())
         return assets;
 
@@ -73,8 +71,7 @@ inline Assets resolveAssets(cube::Game *game) {
         std::optional<std::pair<uint32_t, uint32_t>> selected;
         bool ambiguous = false;
         for (const auto &entry : speech.item_identifier_map) {
-            if (entry.second != name || entry.first.first == 0 || entry.first.first > SCHAR_MAX ||
-                entry.first.second > INT_MAX)
+            if (entry.second != name || entry.first.first != 22 || entry.first.second > 19)
                 continue;
             if (selected && *selected != entry.first) {
                 ambiguous = true;

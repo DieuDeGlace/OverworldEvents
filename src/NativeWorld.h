@@ -3,6 +3,7 @@
 #include "EventRules.h"
 #include <cmath>
 #include <climits>
+#include <cstring>
 
 namespace encounters::native {
 inline uintptr_t base() {
@@ -56,6 +57,16 @@ inline cube::Creature *resident(cube::World &world, uint64_t id) {
 }
 inline float maximumHP(cube::Creature *creature) {
     return reinterpret_cast<float (*)(cube::Creature *)>(base() + 0x5fac0)(creature);
+}
+inline void allowRoaming(cube::Creature *creature) {
+    // The appearance factory sets DWORD +0xbcc bit 0x80, selecting a follower
+    // idle path. Without an owner that path waits forever. Native combat runs
+    // separately; clearing this bit restores the ordinary idle/wander path.
+    auto address = reinterpret_cast<unsigned char *>(creature) + 0xbcc;
+    uint32_t flags;
+    std::memcpy(&flags, address, sizeof(flags));
+    flags &= ~0x80u;
+    std::memcpy(address, &flags, sizeof(flags));
 }
 struct ZoneLock {
     cube::World *world;
@@ -117,6 +128,9 @@ inline bool overworld(cube::World *world, Site point, Region owner) {
     if (actual.x != owner.x || actual.y != owner.y)
         return false;
     auto poi = location(world, point);
+    // Native type 0 has no location: both distance/influence are zero.
+    if (poi.type == 0)
+        return true;
     // The nearest descriptor can exist well outside its footprint. Avoid its
     // full influence and an extra margin around the location's own radius.
     if (!std::isfinite(poi.influence) || !std::isfinite(poi.distanceSquared) || poi.influence > 0)
