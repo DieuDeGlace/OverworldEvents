@@ -7,7 +7,14 @@ namespace encounters {
 // Steam's native owner function uses 8192-block cells with warped boundaries.
 // The native owner check remains authoritative at a candidate's actual site.
 constexpr int RegionBlocks = 8192;
-enum class Kind : unsigned { Battle, Rescue, Bounty, ChestSack, ChestBoss, Count };
+enum class Kind : unsigned { Battle, Rescue, Bounty, ChestSack, ChestBoss, Ambush, Count };
+constexpr unsigned NaturalKindCount = unsigned(Kind::Ambush);
+inline bool groupEvent(Kind kind) {
+    return kind == Kind::Battle || kind == Kind::Ambush;
+}
+inline bool guardianEvent(Kind kind) {
+    return kind == Kind::Rescue || kind == Kind::Bounty || kind == Kind::ChestBoss;
+}
 struct Region {
     int x = 0, y = 0;
 };
@@ -36,13 +43,13 @@ struct Plan {
     unsigned enemies;
     uint64_t roll;
 };
-// A cycle is persisted. Reloading an active event preserves its plan; completing
-// it advances the cycle so future encounters move around the region.
+// A cycle is persisted. Chunk reloads within one session preserve the instance;
+// completion or a new session advances it so future encounters move around.
 inline Plan plan(uint64_t world, Region region, unsigned slot, unsigned cycle,
                  unsigned attempt = 0) {
     auto roll = mix(identity(world, region, slot) ^ mix(uint64_t(cycle) + 1));
     auto position = mix(roll ^ mix(uint64_t(attempt) + 0x4f564552ull));
-    auto kind = static_cast<Kind>(roll % unsigned(Kind::Count));
+    auto kind = static_cast<Kind>(roll % NaturalKindCount);
     constexpr unsigned span = RegionBlocks - 128;
     return {{int64_t(region.x) * RegionBlocks + 64 + int64_t(position % span),
              int64_t(region.y) * RegionBlocks + 64 + int64_t((position >> 32) % span)},
@@ -66,9 +73,7 @@ inline bool chestEvent(Kind kind) {
     return kind == Kind::ChestSack || kind == Kind::ChestBoss;
 }
 inline unsigned enemyCount(Kind kind, uint64_t roll) {
-    return kind == Kind::Battle      ? 4u + unsigned((roll >> 16) % 3)
-           : kind == Kind::ChestSack ? 0u
-                                     : 1u;
+    return groupEvent(kind) ? 4u + unsigned((roll >> 16) % 3) : kind == Kind::ChestSack ? 0u : 1u;
 }
 // Fixed, bounded candidates for a user-requested test. Native terrain/POI
 // validation still decides whether any candidate can become an encounter.

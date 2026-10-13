@@ -118,26 +118,27 @@ int main() {
     assert(next.load(path));
     assert(next.find(record.world, record.region, record.slot)->cycle == 8);
 
-    std::vector<std::string> invalid{"",
-                                     "OverworldEventsState 2\nRecords 0\n",
-                                     "OverworldEventsState 1\nRecords -1\n",
-                                     "OverworldEventsState 1\nRecords 65537\n",
-                                     persisted.substr(0, persisted.size() - 7),
-                                     persisted + "unexpected\n",
-                                     changeField(persisted, 6, "5"),
-                                     changeField(persisted, 12, "7"),
-                                     changeField(persisted, 13, "128"),
-                                     changeField(persisted, 14, "2"),
-                                     changeField(persisted, 1, "-1"),
-                                     changeField(persisted, 7, "2147483648"),
-                                     changeField(persisted, 4, "32"),
-                                     changeField(persisted, 21, "4096"),
-                                     changeField(persisted, 22, "5"),
-                                     changeField(persisted, 23, "nan"),
-                                     changeField(persisted, 23, "1.01"),
-                                     changeField(persisted, 11, "65536"),
-                                     changeField(persisted, 18, "253402300800"),
-                                     changeField(persisted, 12, "1junk")};
+    std::vector<std::string> invalid{
+        "",
+        "OverworldEventsState 2\nRecords 0\n",
+        "OverworldEventsState 1\nRecords -1\n",
+        "OverworldEventsState 1\nRecords 65537\n",
+        persisted.substr(0, persisted.size() - 7),
+        persisted + "unexpected\n",
+        changeField(persisted, 6, std::to_string(unsigned(Kind::Count)).c_str()),
+        changeField(persisted, 12, "7"),
+        changeField(persisted, 13, "128"),
+        changeField(persisted, 14, "2"),
+        changeField(persisted, 1, "-1"),
+        changeField(persisted, 7, "2147483648"),
+        changeField(persisted, 4, "32"),
+        changeField(persisted, 21, "4096"),
+        changeField(persisted, 22, "5"),
+        changeField(persisted, 23, "nan"),
+        changeField(persisted, 23, "1.01"),
+        changeField(persisted, 11, "65536"),
+        changeField(persisted, 18, "253402300800"),
+        changeField(persisted, 12, "1junk")};
     auto oneLine = persisted.substr(persisted.find("E "));
     oneLine = oneLine.substr(0, oneLine.find('\n') + 1);
     invalid.push_back("OverworldEventsState 1\nRecords 2\n" + oneLine + oneLine);
@@ -168,6 +169,12 @@ int main() {
     progress.npcHPFraction = 0.7f;
     progress.kind = Kind::Battle;
     assert(!loaded.save(path)); // A planned battle cannot contain only one enemy.
+    progress.kind = Kind::Ambush;
+    assert(!loaded.save(path)); // Town enemy groups share the four-to-six bound.
+    progress.enemyCount = 4;
+    assert(loaded.save(path));
+    assert(next.load(path));
+    assert(next.find(record.world, record.region, record.slot)->kind == Kind::Ambush);
     progress.kind = Kind::ChestSack;
     assert(!loaded.save(path)); // Sack events have no combat enemies.
     progress.kind = Kind::ChestBoss;

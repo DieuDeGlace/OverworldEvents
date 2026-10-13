@@ -121,6 +121,23 @@ const EventRecord *StateStore::find(uint64_t world, Region region, unsigned slot
     auto found = records_.find({world, region, slot});
     return found == records_.end() ? nullptr : &found->second;
 }
+size_t StateStore::restartUnfinished(uint64_t world) {
+    size_t restarted = 0;
+    for (auto &entry : records_) {
+        auto &old = entry.second;
+        if (old.world != world || !old.planned || old.rewardClaimed || old.failed)
+            continue;
+        EventRecord fresh;
+        fresh.world = old.world;
+        fresh.region = old.region;
+        fresh.slot = old.slot;
+        fresh.cycle = old.cycle + 1;
+        fresh.previousSite = old.site;
+        old = fresh;
+        ++restarted;
+    }
+    return restarted;
+}
 bool StateStore::valid(const EventRecord &record) {
     auto coordinate = [](int64_t value) { return value >= INT32_MIN && value <= INT32_MAX; };
     if (record.slot >= MaxSlots || unsigned(record.kind) >= unsigned(Kind::Count) ||
@@ -131,8 +148,8 @@ bool StateStore::valid(const EventRecord &record) {
         !coordinate(record.previousSite.x) || !coordinate(record.previousSite.y))
         return false;
     if ((record.kind == Kind::ChestSack && record.enemyCount != 0) ||
-        (record.kind == Kind::Battle && record.enemyCount != 0 && record.enemyCount < 4) ||
-        (record.kind != Kind::Battle && record.enemyCount > 1) ||
+        (groupEvent(record.kind) && record.enemyCount != 0 && record.enemyCount < 4) ||
+        (!groupEvent(record.kind) && record.enemyCount > 1) ||
         (record.planned && record.kind != Kind::ChestSack && record.enemyCount == 0))
         return false;
     auto health = [](float value) { return std::isfinite(value) && value >= 0.f && value <= 1.f; };

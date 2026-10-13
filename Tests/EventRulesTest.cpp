@@ -40,8 +40,10 @@ int main() {
                 }
             }
         }
-    for (auto count : seen)
-        assert(count > 1000);
+    for (unsigned kind = 0; kind < NaturalKindCount; ++kind)
+        assert(seen[kind] > 1000);
+    assert(seen[unsigned(Kind::Ambush)] == 0);
+    assert(enemyCount(Kind::Ambush, 0) == 4 && enemyCount(Kind::Ambush, 2ull << 16) == 6);
     assert(!objectiveComplete(0, 0xff) && !objectiveComplete(7, 0xff));
     auto deadline = cooldownDeadline(1000, 120);
     assert(deadline == 8200);

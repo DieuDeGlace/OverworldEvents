@@ -58,6 +58,9 @@ class StateStore {
     const Records &entries() const {
         return records_;
     }
+    // An encounter is stable within a world session. A new session rerolls
+    // unfinished instances without discarding completed rewards/cooldowns.
+    size_t restartUnfinished(uint64_t world);
     void clear() {
         records_.clear();
     }
