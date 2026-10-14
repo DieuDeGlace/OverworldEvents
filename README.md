@@ -17,6 +17,18 @@ Travel-equipment rewards are suppressed in the native quest query and two verifi
 - An adventurer requests a nearby named boss's defeat. Return and talk after victory for equipment.
 - Unlock a chest using its event-specific native key, obtained from a sack or a named guardian. Opening the chest grants equipment directly. A key sack lies about 56 blocks from its chest in a world-seeded direction, so the chest is found first and the sack must be searched for.
 
+## Landmark encounters
+
+Some native locations host an encounter of their own, placed at the location itself:
+
+- **Hill, Canyon, Crater, Rocks:** a named boss holding the center, with 3-5 of the region's own enemies around it.
+- **Camp, Bandit Camp:** a named leader with 4-5 followers.
+- **Altar, Sanctuary, Menhir, Circle of Power, Graveyard:** a named guardian with 2-3 minions.
+
+When the whole group has fallen, an unlocked reward chest appears at the center; it pays out once through the same class-checked delivery as other events. The leader uses the guardian HP rule and native boss star bonus. Lakes are left to CubeMegaMod's lake encounters, and villages, dungeons and other locations are unchanged. Native location types were checked against the executable's location-name table.
+
+Locations are found with native location queries on a 128-block lattice around the player (they read the world plan and generate no terrain); an encounter starts when you come within about 160 blocks. Each landmark has its own record in reserved per-region slots 8-31 (random encounters use the lower slots), so a finished landmark stays done for the session and returns, rerolled, after its cooldown. Landmark encounters have their own active cap, `LandmarkEventCap` (default 2, 0 disables them), separate from `ActiveEventCap`. The map shows the mission-tag icon on the group, then on the reward chest. `/events landmarks` writes the qualifying locations near you to the log.
+
 Ordinary humanoid villagers can offer a rescue, help-in-battle or four-to-six-enemy clearing quest. A town first refers the player to a suitable existing encounter in its region; otherwise it searches up to 32 already-loaded sites outside the village. Native POI, terrain, enemy-pool and encounter-spacing checks still apply. If no eligible site or active slot is available, the villager keeps its normal interaction. Merchants, pets and named NPCs retain their native interactions. Generic villagers in the same town share one referral, allowing hand-in after NPC/chunk reloads. Rewards can be claimed at that town or the encounter's adventurer, with a shared completion flag preventing duplicate delivery. A town clearing quest requires returning to the town; it has no reward NPC at the enemy group. Referrals last for the current world session.
 
 Small encounters sample random sites within Steam's native 8192-block regions, checking actual region ownership at warped boundaries. Tentative sites continue changing as you explore. Once an encounter starts, its site and actors belong to one instance for the current world session. Moving away does not cancel it. If chunks unload, returning recreates only missing roles, retaining the same instance, defeated enemies and health fractions held in memory. Surviving roles are reused to prevent duplicate NPCs, cages and enemies.
