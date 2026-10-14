@@ -30,10 +30,26 @@ constexpr size_t Sprite = 0x70;                       // plasma::Node *.
 constexpr size_t SpriteSpare = 0x78, Tail = 0x88;     // Zeroed by every native push.
 constexpr ptrdiff_t VectorBegin = -0x48, VectorEnd = -0x40;
 
+// GUI sprite slots the map draws icons with (verified against the native
+// sprite-name loader: enemy 0x348 ... demonportal 0x4b0, plus the location
+// icons up to 0x5a8). A queued icon whose sprite is one of these proves the
+// icon layout before anything is added.
+constexpr size_t FirstMapSprite = 0x338, MapSpriteEnd = 0x5a8;
+// Selectable marker sprites (GUI offsets): MapMarkerSprite in the ini.
+struct NamedSprite {
+    const wchar_t *name;
+    size_t offset;
+};
+constexpr NamedSprite Sprites[] = {{L"missiontag", 0x2a0}, {L"destination", 0x458},
+                                   {L"star", 0x388},       {L"cross", 0x390},
+                                   {L"key", 0x498},        {L"treasure", 0x4a0}};
+
 std::mutex gate;
 std::vector<Marker> markers;
 cube::Game *game = nullptr; // Set with the markers by the game tick.
 std::atomic<bool> installed{false};
+size_t spriteOffset = 0x2a0;
+const char *spriteName = "missiontag";
 
 void emptyText(unsigned char *text) {
     // MSVC std::wstring: 8-wchar inline buffer, size, capacity 7 when inline.
@@ -41,48 +57,72 @@ void emptyText(unsigned char *text) {
     const uint64_t capacity = 7;
     std::memcpy(text + 0x18, &capacity, sizeof(capacity));
 }
-// The native sprites an icon in this list can carry; one proves the layout.
-bool nativeSprite(const cube::GUI &gui, const void *sprite) {
-    const void *known[] = {gui.enemy_node,       gui.monster_node,      gui.npc_node,
-                           gui.object_node,      gui.star_node,         gui.cross_node,
-                           gui.flight_point_node, gui.home_node,         gui.mapposition_node,
-                           gui.direction_node,   gui.missiontag_white_node};
-    for (auto node : known)
-        if (node && node == sprite)
+void *guiSlot(const cube::GUI &gui, size_t offset) {
+    void *value;
+    std::memcpy(&value, reinterpret_cast<const unsigned char *>(&gui) + offset, sizeof(value));
+    return value;
+}
+bool mapSprite(const cube::GUI &gui, const void *sprite) {
+    if (!sprite)
+        return false;
+    for (size_t offset = FirstMapSprite; offset < MapSpriteEnd; offset += sizeof(void *))
+        if (guiSlot(gui, offset) == sprite)
             return true;
     return false;
+}
+// One log line whenever what the hook sees changes (render thread; rare).
+void diagnose(int state, size_t icons, size_t added) {
+    static std::atomic<int> last{-1};
+    if (last.exchange(state) == state)
+        return;
+    static const char *text[] = {"no markers to draw", "marker sprite missing",
+                                 "icon list rejected", "no native template icon in list",
+                                 "markers added"};
+    char message[192];
+    snprintf(message, sizeof(message), "Map icons: %s (native icons=%zu, added=%zu, sprite=%s).",
+             text[state], icons, added, spriteName);
+    FILE *file = nullptr;
+    fopen_s(&file, "Mods/OverworldEvents.log", "a");
+    if (file) {
+        fprintf(file, "%s\n", message);
+        fclose(file);
+    }
 }
 // Called from the hook with the map routine's frame pointer.
 void draw(unsigned char *frame) {
     std::unique_lock<std::mutex> lock(gate, std::try_to_lock);
-    if (!lock.owns_lock() || markers.empty())
+    if (!lock.owns_lock())
         return; // Never block the render path.
-    if (!game || !game->gui.missiontag_white_node)
-        return;
+    if (markers.empty() || !game)
+        return diagnose(0, 0, 0);
+    void *marker = guiSlot(game->gui, spriteOffset);
+    if (!marker)
+        return diagnose(1, 0, 0);
     unsigned char *begin, *end;
     std::memcpy(&begin, frame + VectorBegin, sizeof(begin));
     std::memcpy(&end, frame + VectorEnd, sizeof(end));
     if (!begin || end < begin || (end - begin) % IconSize || size_t(end - begin) / IconSize > 8192)
-        return;
+        return diagnose(2, 0, 0);
+    size_t icons = size_t(end - begin) / IconSize;
     // Use a native icon of this frame as the template for scale, offsets and
-    // flags; its sprite must be a known GUI node, which validates the layout.
+    // flags; its sprite must be one of the GUI's map sprites, which validates
+    // the layout.
     const unsigned char *templateIcon = nullptr;
     for (auto icon = begin; icon < end && !templateIcon; icon += IconSize) {
         void *sprite;
         std::memcpy(&sprite, icon + Sprite, sizeof(sprite));
-        if (nativeSprite(game->gui, sprite))
+        if (mapSprite(game->gui, sprite))
             templateIcon = icon;
     }
     if (!templateIcon)
-        return;
+        return diagnose(3, icons, 0);
     alignas(16) unsigned char icon[IconSize];
     std::memcpy(icon, templateIcon, IconSize);
     emptyText(icon + FirstText);
     emptyText(icon + SecondText);
     std::memset(icon + SpriteSpare, 0, 8);
     std::memset(icon + Tail, 0, 8);
-    void *sprite = game->gui.missiontag_white_node;
-    std::memcpy(icon + Sprite, &sprite, sizeof(sprite));
+    std::memcpy(icon + Sprite, &marker, sizeof(marker));
     const float yellow[4] = {1.f, .82f, .12f, 1.f};
     std::memcpy(icon + Color, yellow, sizeof(yellow));
     auto push = reinterpret_cast<void (*)(void *, const void *)>(native::base() + PushRva);
@@ -91,6 +131,7 @@ void draw(unsigned char *frame) {
         std::memcpy(icon + Position, position, sizeof(position));
         push(frame + VectorBegin, icon); // Copies; the inline empty strings own nothing.
     }
+    diagnose(4, icons, markers.size());
 }
 
 // Machine code: save volatile registers, call draw(rbp), restore, then run the
@@ -137,9 +178,16 @@ bool fail(std::string *error, const char *message) {
 }
 } // namespace
 
-bool initialize(std::string *error) {
+bool initialize(const wchar_t *sprite, std::string *error) {
     if (installed)
         return true;
+    for (const auto &entry : Sprites)
+        if (sprite && _wcsicmp(sprite, entry.name) == 0) {
+            spriteOffset = entry.offset;
+            static char name[32];
+            WideCharToMultiByte(CP_UTF8, 0, entry.name, -1, name, sizeof(name), nullptr, nullptr);
+            spriteName = name;
+        }
     if (!native::supported())
         return fail(error, "Map markers require the supported Steam executable.");
     auto site = reinterpret_cast<unsigned char *>(native::base() + HookRva);

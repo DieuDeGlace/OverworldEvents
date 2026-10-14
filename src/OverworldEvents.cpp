@@ -1253,10 +1253,13 @@ static void initialize() {
     }
     if (value.enabled && setting(L"MapMarkers", 1)) {
         std::string error;
-        if (!mapmarkers::initialize(&error))
+        wchar_t sprite[32]{};
+        GetPrivateProfileStringW(L"OverworldEvents", L"MapMarkerSprite", L"missiontag", sprite,
+                                 32, L".\\Mods\\OverworldEvents.ini");
+        if (!mapmarkers::initialize(sprite, &error))
             log(error.c_str());
         else
-            log("World-map objective icons use the native mission tag.");
+            log("World-map objective icons installed; the first map frame logs what it draws.");
     }
     log(value.enabled ? "OverworldEvents initialized; native assets resolved on world entry."
                       : "OverworldEvents disabled or unsupported Steam executable.");
