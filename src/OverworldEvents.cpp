@@ -5,6 +5,7 @@
 #include "EventHealthRules.h"
 #include "EventObjectRules.h"
 #include "InstanceRules.h"
+#include "MapMarkers.h"
 #include "TownRules.h"
 #include "NativeWorld.h"
 #include "RuntimeAssets.h"
@@ -46,6 +47,10 @@ struct Bridge {
 struct Active {
     EventKey key;
     std::array<uint64_t, ActorCount> actors{};
+    // Last known position (blocks) of the objective, for the world-map icon;
+    // kept while its actor is unloaded so far-away events stay marked.
+    mapmarkers::Marker marker{};
+    bool markerKnown = false;
 };
 struct SpawnRequest {
     EventKey key;
@@ -467,7 +472,9 @@ static void freeRescue(cube::Game *game, const Active &active) {
         }
     }
 }
-static void objectiveMarker(cube::Game *game, const EventRecord &saved, const Active &active) {
+// Marks the objective on the world map: a native mission-tag icon when the map
+// hook is installed, otherwise the objective actor's own map visibility.
+static void objectiveMarker(cube::Game *game, const EventRecord &saved, Active &active) {
     unsigned index = chestEvent(saved.kind) ? Container : Npc;
     if (saved.kind == Kind::Ambush) {
         index = 0;
@@ -485,10 +492,29 @@ static void objectiveMarker(cube::Game *game, const EventRecord &saved, const Ac
         for (auto id : active.actors)
             if (auto actor = native::resident(*world, id))
                 actor->entity_data.binary_toggles &= ~MapMarker;
-        if (!saved.rewardClaimed && !saved.failed)
+        if (!saved.rewardClaimed && !saved.failed && !mapmarkers::active())
             if (auto actor = native::resident(*world, active.actors[index]))
                 actor->entity_data.binary_toggles |= MapMarker;
     }
+    if (auto actor = resident(game, active.actors[index])) {
+        const auto &p = actor->entity_data.position;
+        active.marker = {int32_t(floorDivide(p.x, 65536)), int32_t(floorDivide(p.y, 65536)),
+                         int32_t(floorDivide(p.z, 65536))};
+        active.markerKnown = true;
+    }
+}
+// Hands the unfinished events' objective positions to the map hook.
+static void publishMarkers(const Data &value, cube::Game *game) {
+    if (!mapmarkers::active())
+        return;
+    std::vector<mapmarkers::Marker> markers;
+    for (const auto &active : value.active) {
+        const auto *saved =
+            value.state.find(active.key.world, active.key.region, active.key.slot);
+        if (active.markerKnown && saved && !saved->rewardClaimed && !saved->failed)
+            markers.push_back(active.marker);
+    }
+    mapmarkers::publish(game, markers);
 }
 static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
                   const std::array<LongVector3, ActorCount> &points, Active *existing = nullptr) {
@@ -770,6 +796,7 @@ static void tick(cube::Game *game) {
         if (value.loaded)
             flush(value);
         value.session = nullptr;
+        mapmarkers::publish(nullptr, {});
         value.active.clear();
         value.spawned.clear();
         value.referrals.clear();
@@ -920,6 +947,7 @@ static void tick(cube::Game *game) {
     // dialogue and host registration can enter other engine subsystems.
     for (const auto &request : pending)
         spawn(value, game, record(value, request.key), request.points);
+    publishMarkers(value, game);
     flush(value);
 }
 static void death(cube::Game *game, cube::Creature *creature) {
@@ -1222,6 +1250,13 @@ static void initialize() {
             log(error.c_str());
         else
             log("Original glider/boat/reins/boots sites now generate native dungeons.");
+    }
+    if (value.enabled && setting(L"MapMarkers", 1)) {
+        std::string error;
+        if (!mapmarkers::initialize(&error))
+            log(error.c_str());
+        else
+            log("World-map objective icons use the native mission tag.");
     }
     log(value.enabled ? "OverworldEvents initialized; native assets resolved on world entry."
                       : "OverworldEvents disabled or unsupported Steam executable.");
