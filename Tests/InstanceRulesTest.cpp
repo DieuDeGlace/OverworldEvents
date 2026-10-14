@@ -4,6 +4,11 @@
 
 int main() {
     using namespace encounters;
+    assert(eventEntityId(FirstEntityId) && eventEntityId(EntityIdLimit - 1));
+    assert(!eventEntityId(EntityIdLimit) && !eventEntityId(FirstEntityId - 1) && !eventEntityId(0));
+    assert(!eventEntityId(uint64_t(-2ll))); // CubeMega's negative factory IDs.
+    assert(captiveNeedsCage(Kind::Rescue, false) && !captiveNeedsCage(Kind::Rescue, true));
+    assert(!captiveNeedsCage(Kind::Battle, false) && !captiveNeedsCage(Kind::Bounty, false));
     StateStore state;
     auto &first = state.get(42, {0, 0}, 0);
     first.kind = Kind::Rescue;

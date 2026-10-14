@@ -28,13 +28,16 @@ namespace eventmod {
 using namespace encounters;
 constexpr unsigned Named = 1u << 9, NoTalk = 1u << 13, CanPickup = 1u << 14, Friendly = 1u << 15,
                    Mini = 1u << 17, Boss = 1u << 18, Petrified = 1u << 22;
+// Native EntityBehaviour values; examination objects use objects::ExamineBehaviour.
+constexpr char HostileBehaviour = 1, VillagerBehaviour = 3, InanimateBehaviour = 7;
+// Actor slots: 0-5 enemies, then the event NPC, its ally, the cage/sack and the chest.
 constexpr unsigned Npc = 6, Companion = 7, Object = 8, Container = 9;
 constexpr unsigned ActorCount = 10;
 constexpr short MapMarker = 1 << 8;
 struct Bridge {
     cube::Creature *(*spawn)(const LongVector3 *, const IntVector2 *, int, int, int) = nullptr;
-    void (*drop)(cube::Game *, cube::Creature *, const cube::Item *, cube::Creature *) = nullptr;
-    int (*gear)(const IntVector2 *, uint64_t, cube::Item *) = nullptr;
+    int (*drop)(cube::Game *, cube::Creature *, const cube::Item *, cube::Creature *) = nullptr;
+    int (*gear)(cube::Creature *, const IntVector2 *, uint64_t, cube::Item *) = nullptr;
     void (*dialogue)(cube::Game *, cube::Creature *, const wchar_t *) = nullptr;
     int (*grantKey)(cube::Game *, cube::Creature *, const cube::Item *) = nullptr;
     int (*consumeKey)(cube::Game *, cube::Creature *, const cube::Item *) = nullptr;
@@ -105,7 +108,8 @@ static bool connect(Bridge &bridge) {
     auto version =
         module ? reinterpret_cast<unsigned (*)()>(GetProcAddress(module, "OverworldBridgeVersion"))
                : nullptr;
-    if (!version || version() != 1)
+    // Version 2 validates gear for the actual recipient and reports delivery.
+    if (!version || version() != 2)
         return false;
     Bridge candidate;
     candidate.spawn =
@@ -196,6 +200,30 @@ static float fraction(cube::Creature *creature) {
                ? std::clamp(creature->entity_data.HP / maximum, 0.f, 1.f)
                : 1.f;
 }
+// Remove an actor on every world copy. Inanimate, opened and at zero HP it can
+// no longer be talked to, looted, targeted or shown on the map.
+static void despawn(cube::Game *game, uint64_t id) {
+    for (auto world : {&game->host.world, game->world}) {
+        if (!world)
+            continue;
+        if (auto actor = native::resident(*world, id)) {
+            actor->entity_data.binary_toggles &= ~MapMarker;
+            actor->entity_data.interaction_state = 2;
+            actor->entity_data.hostility_type = InanimateBehaviour;
+            actor->entity_data.HP = 0;
+        }
+    }
+}
+// Forget a role before removing it, so its removal is not seen as a death.
+static void releaseRole(cube::Game *game, Active &active, unsigned index) {
+    auto id = active.actors[index];
+    active.actors[index] = 0;
+    despawn(game, id);
+}
+static void friendlyActor(cube::Creature *creature) {
+    auto &flags = creature->entity_data.appearance.flags2;
+    flags = (flags & ~(NoTalk | CanPickup | Petrified)) | Friendly;
+}
 static bool sameRegion(Region a, Region b) {
     return a.x == b.x && a.y == b.y;
 }
@@ -212,7 +240,7 @@ static std::vector<cube::Creature *> enemies(cube::Game *game, Region region, co
         auto &entity = creature->entity_data;
         // Wraiths use a native home-position teleport route not initialized by
         // the common factory. Exclude that race rather than spawning it at 0,0.
-        if (entity.hostility_type != 1 || entity.HP <= 0 || entity.race == 276 ||
+        if (entity.hostility_type != HostileBehaviour || entity.HP <= 0 || entity.race == 276 ||
             (entity.appearance.flags2 & (Named | Friendly | Mini | Boss)))
             continue;
         auto actual = native::region(game->world, native::position(creature));
@@ -232,6 +260,32 @@ static std::vector<cube::Creature *> enemies(cube::Game *game, Region region, co
             break;
     }
     return pool;
+}
+// Fill an encounter's enemy races/stars from the region's sampled natives.
+static bool chooseEnemies(cube::Game *game, Region region, const Data &value, uint64_t roll,
+                          EventRecord &saved) {
+    if (!saved.enemyCount)
+        return true;
+    auto pool = enemies(game, region, value);
+    if (pool.empty())
+        return false;
+    for (unsigned index = 0; index < saved.enemyCount; ++index) {
+        auto pick = pool[mix(roll + index) % pool.size()];
+        saved.enemyRaces[index] = pick->entity_data.race;
+        saved.enemyStars[index] = stars(int(pick->entity_data.level), guardianEvent(saved.kind));
+    }
+    return true;
+}
+static EventRecord *unusedSlot(Data &value, Region region) {
+    for (unsigned slot = 0; slot < value.slots; ++slot) {
+        if (value.state.size() >= StateStore::MaxRecords &&
+            !value.state.find(value.world, region, slot))
+            continue;
+        auto &saved = value.state.get(value.world, region, slot);
+        if (!saved.planned && !saved.rewardClaimed && !saved.failed)
+            return &saved;
+    }
+    return nullptr;
 }
 static bool available(const Assets &assets, Kind kind) {
     if (!chestEvent(kind) && kind != Kind::Ambush && assets.npcRaces.empty())
@@ -312,7 +366,7 @@ static void nameBoss(cube::Creature *creature, uint64_t roll) {
 }
 static void noncombatObject(cube::Creature *creature) {
     auto &entity = creature->entity_data;
-    entity.hostility_type = 8;
+    entity.hostility_type = objects::ExamineBehaviour;
     entity.HP = 1.f; // Native objects need positive liveness, without health UI.
     std::memset(&entity.equipment, 0, sizeof(entity.equipment));
     entity.appearance.flags2 &= ~(NoTalk | CanPickup | Petrified | Friendly | Named | Mini | Boss);
@@ -352,7 +406,7 @@ static void freeRescue(cube::Game *game, const Active &active) {
         if (!world)
             continue;
         if (auto npc = native::resident(*world, active.actors[Npc])) {
-            npc->entity_data.hostility_type = 3;
+            npc->entity_data.hostility_type = VillagerBehaviour;
             npc->entity_data.current_ability = 0;
             npc->entity_data.appearance.flags2 |= Friendly;
             npc->entity_data.HP = native::maximumHP(npc);
@@ -412,29 +466,47 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     int friendlyRace = value.assets.npcRaces.empty()
                            ? -1
                            : value.assets.npcRaces[roll % value.assets.npcRaces.size()];
-    if (!chestEvent(saved.kind) && saved.kind != Kind::Ambush && missing(Npc)) {
+    if (captiveNeedsCage(saved.kind, saved.rewardClaimed) && missing(Object)) {
+        auto cage = spawnActor(value, active, Object, points[Object], *value.assets.cageRace,
+                               objects::ExamineBehaviour, 0);
+        if (cage) {
+            noncombatObject(cage);
+            cage->entity_data.yaw = cage->entity_data.pitch = cage->entity_data.roll = 0.f;
+            const auto &appearance = cage->entity_data.appearance;
+            setPosition(cage,
+                        objects::cagePosition(points[Object], int(cage->entity_data.race),
+                                              appearance.graphics_scale, appearance.hitbox_scale,
+                                              appearance.chest_scale));
+        }
+    }
+    // A captive is only created inside an existing cage; without one it waits
+    // for the cage's next retry instead of standing free outside it.
+    bool captiveReady = !captiveNeedsCage(saved.kind, saved.rewardClaimed) || !missing(Object);
+    if (!chestEvent(saved.kind) && saved.kind != Kind::Ambush && missing(Npc) && captiveReady) {
         // The native behaviour-3 talk branch reaches CubeMega's existing hook.
         // Behaviour 4 follows a separate path and cannot deliver event dialogue.
         auto npc = spawnActor(value, active, Npc, points[Npc], friendlyRace,
-                              saved.kind == Kind::Battle ? 3 : 8, 2);
-        if (!npc)
-            return false;
-        npc->entity_data.appearance.flags2 =
-            (npc->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) | Friendly;
-        if (saved.kind == Kind::Battle)
-            npc->entity_data.HP = native::maximumHP(npc) * std::max(.05f, saved.npcHPFraction);
-        else
-            noncombatObject(npc);
-        snprintf(npc->entity_data.name, 16, "%s", "Adventurer");
-        if (saved.kind == Kind::Battle)
-            native::allowRoaming(npc);
+                              saved.kind == Kind::Battle ? VillagerBehaviour
+                                                         : objects::ExamineBehaviour,
+                              2);
+        // A failed NPC is retried like any missing role. Returning early here
+        // would leave actors created above untracked, and the slot would spawn twice.
+        if (npc) {
+            friendlyActor(npc);
+            if (saved.kind == Kind::Battle)
+                npc->entity_data.HP = native::maximumHP(npc) * std::max(.05f, saved.npcHPFraction);
+            else
+                noncombatObject(npc);
+            snprintf(npc->entity_data.name, 16, "%s", "Adventurer");
+            if (saved.kind == Kind::Battle)
+                native::allowRoaming(npc);
+        }
     }
     if (saved.kind == Kind::Battle && missing(Companion)) {
-        auto ally = spawnActor(value, active, Companion, points[Companion], friendlyRace, 3, 1);
+        auto ally = spawnActor(value, active, Companion, points[Companion], friendlyRace,
+                               VillagerBehaviour, 1);
         if (ally) {
-            ally->entity_data.appearance.flags2 =
-                (ally->entity_data.appearance.flags2 & ~(NoTalk | CanPickup | Petrified)) |
-                Friendly;
+            friendlyActor(ally);
             native::allowRoaming(ally);
         }
     }
@@ -445,8 +517,8 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             continue;
         if (guardianEvent(saved.kind))
             unregisterGuardian(value, active.actors[enemy]);
-        auto creature = spawnActor(value, active, enemy, points[enemy], saved.enemyRaces[enemy], 1,
-                                   saved.enemyStars[enemy]);
+        auto creature = spawnActor(value, active, enemy, points[enemy], saved.enemyRaces[enemy],
+                                   HostileBehaviour, saved.enemyStars[enemy]);
         if (!creature)
             continue;
         creature->entity_data.appearance.flags2 &= ~(Friendly | Named | Mini | Boss);
@@ -458,21 +530,9 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
         creature->entity_data.HP =
             native::maximumHP(creature) * std::clamp(saved.enemyHPFraction[enemy], .01f, 1.f);
     }
-    if (saved.kind == Kind::Rescue && !saved.rewardClaimed && missing(Object)) {
-        auto cage = spawnActor(value, active, Object, points[Object], *value.assets.cageRace, 8, 0);
-        if (cage) {
-            noncombatObject(cage);
-            cage->entity_data.yaw = cage->entity_data.pitch = cage->entity_data.roll = 0.f;
-            const auto &appearance = cage->entity_data.appearance;
-            setPosition(cage,
-                        objects::cagePosition(points[Object], int(cage->entity_data.race),
-                                              appearance.graphics_scale, appearance.hitbox_scale,
-                                              appearance.chest_scale));
-        }
-    }
     if (saved.kind == Kind::ChestSack && missing(Object)) {
-        auto sack =
-            spawnActor(value, active, Object, points[Container], *value.assets.sackRace, 8, 0);
+        auto sack = spawnActor(value, active, Object, points[Container], *value.assets.sackRace,
+                               objects::ExamineBehaviour, 0);
         if (sack) {
             // Native examination objects are excluded from combat targeting and
             // NPC health UI. Keep only positive liveness; this sack carries no gear.
@@ -480,8 +540,8 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
         }
     }
     if (chestEvent(saved.kind) && missing(Container)) {
-        auto chest =
-            spawnActor(value, active, Container, points[Object], value.assets.chestRace, 8, 0);
+        auto chest = spawnActor(value, active, Container, points[Object], value.assets.chestRace,
+                                objects::ExamineBehaviour, 0);
         if (chest) {
             noncombatObject(chest);
             chest->entity_data.interaction_state = saved.rewardClaimed ? 2 : 1;
@@ -495,7 +555,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     complete &= saved.kind != Kind::Rescue || saved.rewardClaimed || active.actors[Object] != 0;
     for (unsigned enemy = 0; enemy < saved.enemyCount; ++enemy)
         complete &= (saved.defeatedMask & (1u << enemy)) || active.actors[enemy] != 0;
-    if (saved.kind == Kind::Rescue && !saved.rewardClaimed)
+    if (captiveNeedsCage(saved.kind, saved.rewardClaimed))
         bindRescue(game, active);
     objectiveMarker(game, saved, active);
     if (!complete) {
@@ -527,20 +587,39 @@ static void retire(Data &value, cube::Game *game, Active &active) {
     auto &saved = record(value, active.key);
     active.retiring = true; // Death callbacks must not complete an unloaded event.
     for (unsigned index = 0; index < ActorCount; ++index) {
-        auto creature = native::resident(game->host.world, active.actors[index]);
-        if (!creature)
-            continue;
-        if (index < saved.enemyCount && !(saved.defeatedMask & (1u << index)))
-            saved.enemyHPFraction[index] = fraction(creature);
-        if (index == Npc)
-            saved.npcHPFraction = fraction(creature);
-        creature->entity_data.hostility_type = 7;
-        creature->entity_data.HP = 0;
+        if (auto creature = native::resident(game->host.world, active.actors[index])) {
+            if (index < saved.enemyCount && !(saved.defeatedMask & (1u << index)))
+                saved.enemyHPFraction[index] = fraction(creature);
+            if (index == Npc)
+                saved.npcHPFraction = fraction(creature);
+        }
+        // Client replicas are closed too: a retired chest must never reopen.
+        despawn(game, active.actors[index]);
     }
     value.dirty = true;
 }
 static void death(cube::Game *game, cube::Creature *creature);
+// Event actors that no instance owns (left from a dropped or older instance)
+// are removed: they could duplicate a role or open as an ordinary chest.
+static void removeOrphans(const Data &value, cube::Game *game) {
+    std::vector<uint64_t> orphans;
+    for (auto creature : game->host.world.creatures) {
+        if (!creature || creature->entity_data.HP <= 0)
+            continue;
+        auto id = uint64_t(creature->id);
+        if (eventEntityId(id) && !owned(value, id))
+            orphans.push_back(id);
+    }
+    for (auto id : orphans)
+        despawn(game, id);
+    if (!orphans.empty()) {
+        char message[96];
+        snprintf(message, sizeof(message), "Removed %zu untracked event actor(s).", orphans.size());
+        log(message);
+    }
+}
 static void update(Data &value, cube::Game *game, Site player) {
+    removeOrphans(value, game);
     for (auto it = value.active.begin(); it != value.active.end();) {
         if (it->retiring && std::none_of(it->actors.begin(), it->actors.end(),
                                          [&](auto id) { return resident(game, id) != nullptr; })) {
@@ -566,8 +645,13 @@ static void update(Data &value, cube::Game *game, Site player) {
                         saved.npcHPFraction = fraction(creature);
                 }
         if (!it->retiring && !saved.rewardClaimed && !saved.failed) {
-            if (saved.kind == Kind::Rescue)
+            if (captiveNeedsCage(saved.kind, saved.rewardClaimed)) {
+                // If the cage unloaded or failed, the captive goes too; both are
+                // recreated together, the captive inside the new cage.
+                if (!resident(game, it->actors[Object]) && it->actors[Npc])
+                    releaseRole(game, *it, Npc);
                 bindRescue(game, *it);
+            }
             if (within(player, saved.site, 192)) {
                 // A chunk may unload actors. Retain this instance and recreate
                 // only absent roles when it is approached again.
@@ -612,14 +696,7 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
         value.requestedTest = Kind::Count;
         return;
     }
-    EventRecord *selected = nullptr;
-    for (unsigned slot = 0; slot < value.slots; ++slot) {
-        auto &saved = value.state.get(value.world, region, slot);
-        if (!saved.planned && !saved.rewardClaimed && !saved.failed) {
-            selected = &saved;
-            break;
-        }
-    }
+    auto selected = unusedSlot(value, region);
     if (!selected) {
         say(L"This region has no unused event slot. Try testing in another region.");
         value.requestedTest = Kind::Count;
@@ -642,19 +719,9 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
             native::ZoneLock locked(game->world);
             if (!locked.held)
                 return;
-            if (!place(game, candidate, points))
+            if (!place(game, candidate, points) ||
+                !chooseEnemies(game, region, value, roll, candidate))
                 continue;
-            if (candidate.enemyCount) {
-                auto pool = enemies(game, region, value);
-                if (pool.empty())
-                    continue;
-                for (unsigned index = 0; index < candidate.enemyCount; ++index) {
-                    auto pick = pool[mix(roll + index) % pool.size()];
-                    candidate.enemyRaces[index] = pick->entity_data.race;
-                    candidate.enemyStars[index] =
-                        stars(int(pick->entity_data.level), guardianEvent(candidate.kind));
-                }
-            }
         }
         candidate.planned = true;
         *selected = candidate;
@@ -682,8 +749,10 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
 static void tick(cube::Game *game) {
     auto &value = data();
     std::lock_guard<std::recursive_mutex> guard(value.gate);
-    if (!value.enabled || !game || !game->host.running || !game->world ||
-        !game->world->local_creature) {
+    if (value.enabled && game && game->host.running && game->world &&
+        !game->world->local_creature)
+        return; // Loading or respawning: keep tracking live actors, never re-spawn them.
+    if (!value.enabled || !game || !game->host.running || !game->world) {
         if (value.loaded)
             flush(value);
         value.session = nullptr;
@@ -824,17 +893,8 @@ static void tick(cube::Game *game) {
                             nextCandidate(saved);
                         continue;
                     }
-                    if (!saved.planned && saved.enemyCount) {
-                        auto pool = enemies(game, area, value);
-                        if (pool.empty())
-                            continue;
-                        for (unsigned enemy = 0; enemy < saved.enemyCount; ++enemy) {
-                            auto pick = pool[mix(planned.roll + enemy) % pool.size()];
-                            saved.enemyRaces[enemy] = pick->entity_data.race;
-                            saved.enemyStars[enemy] =
-                                stars(int(pick->entity_data.level), guardianEvent(saved.kind));
-                        }
-                    }
+                    if (!saved.planned && !chooseEnemies(game, area, value, planned.roll, saved))
+                        continue;
                     saved.planned = true;
                     value.dirty = true;
                     pending.push_back({{saved.world, saved.region, saved.slot}, points});
@@ -881,24 +941,40 @@ static void death(cube::Game *game, cube::Creature *creature) {
         }
     }
 }
+// Exactly one reward per instance. The claim is saved before the item drops so
+// a crash cannot repeat it, and undone if the bridge rejects the item.
 static bool deliver(Data &value, cube::Game *game, EventRecord &saved, const Active &active) {
+    if (saved.rewardClaimed)
+        return false;
+    auto recipient = game->world->local_creature;
     cube::Item reward;
     IntVector2 area(saved.region.x, saved.region.y);
     auto roll = plan(saved.world, saved.region, saved.slot, saved.cycle).roll;
-    if (!value.bridge.gear(&area, roll, &reward))
+    // The bridge generates for this recipient's class and rejects anything
+    // outside its native class gear (e.g. silk for mages, cotton for rogues).
+    if (!value.bridge.gear(recipient, &area, roll, &reward))
         return false;
+    auto unclaim = [&] {
+        saved.rewardClaimed = false;
+        saved.deadlineUTCsecs = 0;
+        value.dirty = true;
+    };
     saved.rewardClaimed = true;
     saved.deadlineUTCsecs = cooldownDeadline(utc(), value.cooldown);
     saved.emptySince = 0;
     value.dirty = true;
     if (!flush(value)) {
-        saved.rewardClaimed = false;
-        saved.deadlineUTCsecs = 0;
+        unclaim();
         return false;
     }
     // Resolve a surviving corpse at delivery; no native pointers survive frames.
     auto source = native::resident(game->host.world, active.actors[0]);
-    value.bridge.drop(game, game->world->local_creature, &reward, source);
+    if (!value.bridge.drop(game, recipient, &reward, source)) {
+        unclaim();
+        flush(value);
+        log("Reward rejected at delivery; the claim was undone so it can be retried.");
+        return false;
+    }
     return true;
 }
 static void describeReferral(Data &value, cube::Game *game, cube::Creature *speaker,
@@ -975,17 +1051,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
     }
     if (value.active.size() >= value.cap)
         return 0;
-    EventRecord *selected = nullptr;
-    for (unsigned slot = 0; slot < value.slots; ++slot) {
-        if (value.state.size() >= StateStore::MaxRecords &&
-            !value.state.find(value.world, region, slot))
-            continue;
-        auto &saved = value.state.get(value.world, region, slot);
-        if (!saved.planned && !saved.rewardClaimed && !saved.failed) {
-            selected = &saved;
-            break;
-        }
-    }
+    auto selected = unusedSlot(value, region);
     if (!selected)
         return 0;
     auto candidate = *selected;
@@ -1000,9 +1066,6 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
         native::ZoneLock locked(game->world);
         if (!locked.held)
             return 0;
-        auto pool = enemies(game, region, value);
-        if (pool.empty())
-            return 0;
         for (unsigned attempt = 0; attempt < 32; ++attempt) {
             candidate.site = town::candidate(center, village.radius, attempt);
             if (!relocating(candidate.site, candidate.previousSite, candidate.cycle) ||
@@ -1010,13 +1073,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
                                candidate.site, utc()) ||
                 !place(game, candidate, points))
                 continue;
-            for (unsigned enemy = 0; enemy < candidate.enemyCount; ++enemy) {
-                auto pick = pool[mix(roll + enemy) % pool.size()];
-                candidate.enemyRaces[enemy] = pick->entity_data.race;
-                candidate.enemyStars[enemy] =
-                    stars(int(pick->entity_data.level), guardianEvent(candidate.kind));
-            }
-            placed = true;
+            placed = chooseEnemies(game, region, value, roll, candidate);
             break;
         }
     }
@@ -1038,14 +1095,16 @@ static int interaction(cube::Game *game, cube::Creature *creature) {
     auto &value = data();
     std::lock_guard<std::recursive_mutex> guard(value.gate);
     for (auto &active : value.active) {
-        if (active.retiring)
-            continue;
         unsigned actor = ActorCount;
         for (unsigned index = Npc; index < ActorCount; ++index)
             if (active.actors[index] == uint64_t(creature->id))
                 actor = index;
         if (actor == ActorCount)
             continue;
+        // A retiring instance still owns its actors: handled with no effect, so
+        // its chest never falls through to CubeMega's ordinary chest loot.
+        if (active.retiring)
+            return 1;
         auto &saved = record(value, active.key);
         auto speaker = creature;
         if (saved.kind == Kind::Rescue && actor == Object)
