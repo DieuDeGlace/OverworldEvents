@@ -51,6 +51,10 @@ struct Active {
     // kept while its actor is unloaded so far-away events stay marked.
     mapmarkers::Marker marker{};
     bool markerKnown = false;
+    // Spawn positions of the instance's objects (cage/sack, chest), held every
+    // frame so they cannot be pushed around.
+    std::array<LongVector3, ActorCount> anchors{};
+    unsigned anchoredMask = 0;
 };
 struct SpawnRequest {
     EventKey key;
@@ -81,6 +85,13 @@ struct Data {
     Kind requestedTest = Kind::Count;
     unsigned testAttempt = 0;
     bool reportLandmarks = false; // /events landmarks: log nearby landmark locations.
+    cube::Game *game = nullptr;   // The running game, for nameplate queries.
+    // Villager nameplate hints (OverworldEventQuestMarker), refreshed once a second.
+    struct Hint {
+        int marker;
+        uint64_t until;
+    };
+    std::unordered_map<uint64_t, Hint> hints;
 };
 static Data &data() {
     static Data value;
@@ -537,6 +548,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     Active active{{saved.world, saved.region, saved.slot}};
     if (existing)
         active = *existing;
+    const auto before = active.actors;
     struct ConstructionScope {
         Data &data;
         const Active *previous;
@@ -645,6 +657,13 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     complete &= saved.kind != Kind::Rescue || saved.rewardClaimed || active.actors[Object] != 0;
     for (unsigned enemy = 0; enemy < saved.enemyCount; ++enemy)
         complete &= (saved.defeatedMask & (1u << enemy)) || active.actors[enemy] != 0;
+    // Objects created now (after the cage's floor placement) become anchors.
+    for (unsigned index : {Object, Container})
+        if (active.actors[index] && active.actors[index] != before[index])
+            if (auto object = native::resident(game->host.world, active.actors[index])) {
+                active.anchors[index] = object->entity_data.position;
+                active.anchoredMask |= 1u << index;
+            }
     if (captiveNeedsCage(saved.kind, saved.rewardClaimed))
         bindRescue(game, active);
     else if (saved.kind == Kind::Rescue)
@@ -805,6 +824,30 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
         value.requestedTest = Kind::Count;
     }
 }
+// Every frame: event objects (cage, sack, chest) stay exactly where they were
+// placed, like native village props, so walking or fighting into them cannot
+// push them; an unfreed captive stays bound inside its cage. Objects are never
+// resized: they keep the native appearance generated for their race.
+static void holdObjects(Data &value, cube::Game *game) {
+    for (auto &active : value.active) {
+        for (unsigned index : {Object, Container}) {
+            if (!(active.anchoredMask & (1u << index)))
+                continue;
+            auto object = native::resident(game->host.world, active.actors[index]);
+            if (!object || object->entity_data.HP <= 0)
+                continue;
+            auto &entity = object->entity_data;
+            const auto &anchor = active.anchors[index];
+            if (entity.position.x != anchor.x || entity.position.y != anchor.y ||
+                entity.position.z != anchor.z)
+                setPosition(object, anchor);
+            entity.velocity = entity.acceleration = entity.retreat = FloatVector3(0, 0, 0);
+        }
+        const auto *saved = value.state.find(active.key.world, active.key.region, active.key.slot);
+        if (saved && !saved->failed && captiveNeedsCage(saved->kind, saved->rewardClaimed))
+            bindRescue(game, active);
+    }
+}
 // The landmark record for a native location: the slot already bound to it,
 // or a free reserved slot of its region (then bound to it via previousSite).
 static EventRecord *landmarkRecord(Data &value, Region area, Site center) {
@@ -940,6 +983,8 @@ static void tick(cube::Game *game) {
         if (value.loaded)
             flush(value);
         value.session = nullptr;
+        value.game = nullptr;
+        value.hints.clear();
         mapmarkers::publish(nullptr, {});
         value.active.clear();
         value.spawned.clear();
@@ -949,6 +994,8 @@ static void tick(cube::Game *game) {
         value.requestedTest = Kind::Count;
         return;
     }
+    value.game = game;
+    holdObjects(value, game);
     auto nowTick = GetTickCount64();
     if (nowTick < value.nextTick)
         return;
@@ -1459,6 +1506,55 @@ static int chat(std::wstring *message) {
     }
     return 0;
 }
+// Nameplate hint for a villager: 1 when its town can offer an event now,
+// 2 when the event taken from its town is done and ready to hand in, else 0.
+// Called while nameplates are drawn: never waits for the event lock.
+static int questMarker(cube::Creature *creature) {
+    auto &value = data();
+    std::unique_lock<std::recursive_mutex> lock(value.gate, std::try_to_lock);
+    if (!lock.owns_lock() || !creature || !value.enabled || !value.game ||
+        !value.game->world || !value.assets.ready || value.session != &value.game->host.world)
+        return 0;
+    const auto &entity = creature->entity_data;
+    if (!town::eligible(entity.hostility_type, entity.HP, entity.appearance.flags2) ||
+        std::find(value.assets.npcRaces.begin(), value.assets.npcRaces.end(),
+                  int(entity.race)) == value.assets.npcRaces.end())
+        return 0;
+    auto now = GetTickCount64();
+    auto id = uint64_t(creature->id);
+    auto cached = value.hints.find(id);
+    if (cached != value.hints.end() && now < cached->second.until)
+        return cached->second.marker;
+    int marker = 0;
+    auto origin = native::position(creature);
+    auto village = native::location(value.game->world, origin);
+    if (village.type == 5 && std::isfinite(village.influence) && village.influence > 0) {
+        bool referred = false;
+        for (const auto &referral : value.referrals) {
+            if (referral.town.x != village.x || referral.town.y != village.y)
+                continue;
+            referred = true;
+            const auto *saved = value.state.find(referral.objective.world,
+                                                 referral.objective.region,
+                                                 referral.objective.slot);
+            if (saved && saved->cycle == referral.cycle && saved->objectiveDone &&
+                !saved->rewardClaimed && !saved->failed)
+                marker = 2;
+        }
+        if (!referred && unfinished(value, false) < value.cap) {
+            auto region = native::region(value.game->world, origin);
+            for (unsigned slot = 0; slot < value.slots && !marker; ++slot) {
+                const auto *saved = value.state.find(value.world, region, slot);
+                if (!saved || (!saved->planned && !saved->rewardClaimed && !saved->failed))
+                    marker = 1;
+            }
+        }
+    }
+    if (value.hints.size() > 512)
+        value.hints.clear();
+    value.hints[id] = {marker, now + 1000};
+    return marker;
+}
 } // namespace eventmod
 
 class OverworldEvents : public GenericMod {
@@ -1499,6 +1595,9 @@ EXPORT int OverworldEventObjectInteraction(cube::Game *game, cube::Creature *cre
 EXPORT void OverworldEventCreatureDeath(cube::Game *game, cube::Creature *creature,
                                         cube::Creature *) {
     eventmod::death(game, creature);
+}
+EXPORT int OverworldEventQuestMarker(cube::Creature *creature) {
+    return eventmod::questMarker(creature);
 }
 EXPORT int IsOverworldEventEntity(uint64_t id) {
     auto &value = eventmod::data();
