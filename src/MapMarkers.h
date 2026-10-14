@@ -17,7 +17,8 @@ struct Marker {
 };
 // Installs the hook after checking the exact native instructions. On failure
 // the caller keeps its fallback (the actor's own map visibility).
-bool initialize(std::string *error);
+// `sprite`: missiontag (default), destination, star, cross, key or treasure.
+bool initialize(const wchar_t *sprite, std::string *error);
 bool active();
 // Replaces the markers drawn from the next map frame on (none without a game).
 void publish(cube::Game *game, const std::vector<Marker> &markers);
