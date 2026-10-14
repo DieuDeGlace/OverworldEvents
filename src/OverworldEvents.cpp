@@ -5,6 +5,7 @@
 #include "EventHealthRules.h"
 #include "EventObjectRules.h"
 #include "InstanceRules.h"
+#include "MapMarkers.h"
 #include "TownRules.h"
 #include "NativeWorld.h"
 #include "RuntimeAssets.h"
@@ -46,6 +47,10 @@ struct Bridge {
 struct Active {
     EventKey key;
     std::array<uint64_t, ActorCount> actors{};
+    // Last known position (blocks) of the objective, for the world-map icon;
+    // kept while its actor is unloaded so far-away events stay marked.
+    mapmarkers::Marker marker{};
+    bool markerKnown = false;
 };
 struct SpawnRequest {
     EventKey key;
@@ -72,8 +77,10 @@ struct Data {
     uint64_t world = 0, nextTick = 0;
     bool enabled = true, dirty = false, loaded = false, assetLog = false;
     unsigned slots = 3, cap = 2, cooldown = 120;
+    unsigned landmarkCap = 2; // Active landmark encounters; 0 disables them.
     Kind requestedTest = Kind::Count;
     unsigned testAttempt = 0;
+    bool reportLandmarks = false; // /events landmarks: log nearby landmark locations.
 };
 static Data &data() {
     static Data value;
@@ -148,11 +155,13 @@ static EventRecord &record(Data &value, const EventKey &key) {
 }
 // Completed and failed instances stay in the world for the session; only
 // unfinished ones count toward the active-event cap.
-static unsigned unfinished(const Data &value) {
+// Random and landmark encounters have separate caps.
+static unsigned unfinished(const Data &value, bool landmarks) {
     unsigned count = 0;
     for (const auto &active : value.active) {
         const auto *saved = value.state.find(active.key.world, active.key.region, active.key.slot);
-        count += saved && !saved->rewardClaimed && !saved->failed;
+        count += saved && !saved->rewardClaimed && !saved->failed &&
+                 landmarkEvent(saved->kind) == landmarks;
     }
     return count;
 }
@@ -284,7 +293,7 @@ static bool chooseEnemies(cube::Game *game, Region region, const Data &value, ui
     for (unsigned index = 0; index < saved.enemyCount; ++index) {
         auto pick = pool[mix(roll + index) % pool.size()];
         saved.enemyRaces[index] = pick->entity_data.race;
-        saved.enemyStars[index] = stars(int(pick->entity_data.level), guardianEvent(saved.kind));
+        saved.enemyStars[index] = stars(int(pick->entity_data.level), leader(saved.kind, index));
     }
     return true;
 }
@@ -326,11 +335,12 @@ static bool needsPosition(const EventRecord &saved, unsigned index) {
     if (index < Npc)
         return index < saved.enemyCount && !(saved.defeatedMask & (1u << index));
     if (index == Npc)
-        return !chestEvent(saved.kind) && saved.kind != Kind::Ambush;
+        return !chestEvent(saved.kind) && saved.kind != Kind::Ambush && !landmarkEvent(saved.kind);
     if (index == Companion)
         return saved.kind == Kind::Battle;
-    if (index == Object)
-        return chestEvent(saved.kind) || (saved.kind == Kind::Rescue && !saved.rewardClaimed);
+    if (index == Object) // Chest point (chest and landmark events) or the cage.
+        return chestEvent(saved.kind) || landmarkEvent(saved.kind) ||
+               (saved.kind == Kind::Rescue && !saved.rewardClaimed);
     return saved.kind == Kind::ChestSack; // Separate sack offset.
 }
 // Actor slots an instance should currently have in the world.
@@ -338,12 +348,13 @@ static bool expectsRole(const EventRecord &saved, unsigned index) {
     if (index < Npc)
         return index < saved.enemyCount && !(saved.defeatedMask & (1u << index));
     if (index == Npc)
-        return !chestEvent(saved.kind) && saved.kind != Kind::Ambush;
+        return !chestEvent(saved.kind) && saved.kind != Kind::Ambush && !landmarkEvent(saved.kind);
     if (index == Companion)
         return saved.kind == Kind::Battle;
     if (index == Object) // Sack, or the cage of an unfreed captive.
         return saved.kind == Kind::ChestSack || captiveNeedsCage(saved.kind, saved.rewardClaimed);
-    return chestEvent(saved.kind); // Container: the chest.
+    // Container: the chest; a landmark's reward chest appears once its group falls.
+    return chestEvent(saved.kind) || (landmarkEvent(saved.kind) && saved.objectiveDone);
 }
 // The key sack lies well away from its chest so that finding it is part of the
 // event: about 56 blocks out, in a world-seeded direction, on open dry ground.
@@ -363,8 +374,15 @@ static bool sackPoint(cube::Game *game, const EventRecord &saved, int center, Si
 }
 static bool place(cube::Game *game, EventRecord &saved,
                   std::array<LongVector3, ActorCount> &points) {
+    // Random encounters avoid native locations; a landmark encounter is placed
+    // inside its location on purpose, so it only checks the region owner.
+    bool landmark = landmarkEvent(saved.kind);
+    auto allowed = [&](Site point) {
+        return landmark ? sameRegion(native::region(game->world, point), saved.region)
+                        : native::overworld(game->world, point, saved.region);
+    };
     int center = 0;
-    if (!native::overworld(game->world, saved.site, saved.region) ||
+    if (!allowed(saved.site) ||
         !footprint(game->world, saved.site, center, saved.kind == Kind::Rescue ? 3 : 1,
                    saved.kind == Kind::Rescue))
         return false;
@@ -376,13 +394,15 @@ static bool place(cube::Game *game, EventRecord &saved,
         // farther from the quest giver/prisoner, who stays at the event center.
         if (actor == 0 && guardianEvent(saved.kind))
             offset = {36, 0};
+        if (actor == 0 && landmark)
+            offset = {0, 0}; // The leader holds the landmark's center.
         Site point{saved.site.x + offset.x, saved.site.y + offset.y};
         int height = 0;
         if (actor == Container && saved.kind == Kind::ChestSack) {
             if (!sackPoint(game, saved, center, point, height))
                 return false;
-        } else if (!native::ground(game->world, point, height, 5) || abs(height - center) > 3 ||
-                   !native::overworld(game->world, point, saved.region))
+        } else if (!native::ground(game->world, point, height, 5) ||
+                   abs(height - center) > (landmark ? 6 : 3) || !allowed(point))
             return false;
         points[actor] =
             LongVector3(point.x * 65536 + 32768, point.y * 65536 + 32768, int64_t(height) * 65536);
@@ -467,9 +487,12 @@ static void freeRescue(cube::Game *game, const Active &active) {
         }
     }
 }
-static void objectiveMarker(cube::Game *game, const EventRecord &saved, const Active &active) {
-    unsigned index = chestEvent(saved.kind) ? Container : Npc;
-    if (saved.kind == Kind::Ambush) {
+// Marks the objective on the world map: a native mission-tag icon when the map
+// hook is installed, otherwise the objective actor's own map visibility.
+static void objectiveMarker(cube::Game *game, const EventRecord &saved, Active &active) {
+    bool landmark = landmarkEvent(saved.kind);
+    unsigned index = chestEvent(saved.kind) || (landmark && saved.objectiveDone) ? Container : Npc;
+    if (saved.kind == Kind::Ambush || (landmark && !saved.objectiveDone)) {
         index = 0;
         for (unsigned enemy = 0; enemy < saved.enemyCount; ++enemy)
             if (!(saved.defeatedMask & (1u << enemy)) && resident(game, active.actors[enemy])) {
@@ -485,10 +508,29 @@ static void objectiveMarker(cube::Game *game, const EventRecord &saved, const Ac
         for (auto id : active.actors)
             if (auto actor = native::resident(*world, id))
                 actor->entity_data.binary_toggles &= ~MapMarker;
-        if (!saved.rewardClaimed && !saved.failed)
+        if (!saved.rewardClaimed && !saved.failed && !mapmarkers::active())
             if (auto actor = native::resident(*world, active.actors[index]))
                 actor->entity_data.binary_toggles |= MapMarker;
     }
+    if (auto actor = resident(game, active.actors[index])) {
+        const auto &p = actor->entity_data.position;
+        active.marker = {int32_t(floorDivide(p.x, 65536)), int32_t(floorDivide(p.y, 65536)),
+                         int32_t(floorDivide(p.z, 65536))};
+        active.markerKnown = true;
+    }
+}
+// Hands the unfinished events' objective positions to the map hook.
+static void publishMarkers(const Data &value, cube::Game *game) {
+    if (!mapmarkers::active())
+        return;
+    std::vector<mapmarkers::Marker> markers;
+    for (const auto &active : value.active) {
+        const auto *saved =
+            value.state.find(active.key.world, active.key.region, active.key.slot);
+        if (active.markerKnown && saved && !saved->rewardClaimed && !saved->failed)
+            markers.push_back(active.marker);
+    }
+    mapmarkers::publish(game, markers);
 }
 static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
                   const std::array<LongVector3, ActorCount> &points, Active *existing = nullptr) {
@@ -527,7 +569,8 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
     // A captive is only created inside an existing cage; without one it waits
     // for the cage's next retry instead of standing free outside it.
     bool captiveReady = !captiveNeedsCage(saved.kind, saved.rewardClaimed) || !missing(Object);
-    if (!chestEvent(saved.kind) && saved.kind != Kind::Ambush && missing(Npc) && captiveReady) {
+    if (!chestEvent(saved.kind) && saved.kind != Kind::Ambush && !landmarkEvent(saved.kind) &&
+        missing(Npc) && captiveReady) {
         // The native behaviour-3 talk branch reaches CubeMega's existing hook.
         // Behaviour 4 follows a separate path and cannot deliver event dialogue.
         auto npc = spawnActor(value, active, Npc, points[Npc], friendlyRace,
@@ -560,7 +603,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             continue;
         if (!missing(enemy))
             continue;
-        if (guardianEvent(saved.kind))
+        if (leader(saved.kind, enemy))
             unregisterGuardian(value, active.actors[enemy]);
         auto creature = spawnActor(value, active, enemy, points[enemy], saved.enemyRaces[enemy],
                                    HostileBehaviour, saved.enemyStars[enemy]);
@@ -568,7 +611,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             continue;
         creature->entity_data.appearance.flags2 &= ~(Friendly | Named | Mini | Boss);
         native::allowRoaming(creature);
-        if (guardianEvent(saved.kind)) {
+        if (leader(saved.kind, enemy)) {
             registerGuardian(value, uint64_t(creature->id));
             nameBoss(creature, roll);
         }
@@ -584,7 +627,8 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             noncombatObject(sack);
         }
     }
-    if (chestEvent(saved.kind) && missing(Container)) {
+    bool rewardChest = chestEvent(saved.kind) || (landmarkEvent(saved.kind) && saved.objectiveDone);
+    if (rewardChest && missing(Container)) {
         auto chest = spawnActor(value, active, Container, points[Object], value.assets.chestRace,
                                 objects::ExamineBehaviour, 0);
         if (chest) {
@@ -592,9 +636,10 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             chest->entity_data.interaction_state = saved.rewardClaimed ? 2 : 1;
         }
     }
-    bool complete = saved.kind == Kind::Ambush ? active.actors[0] != 0
-                    : chestEvent(saved.kind)   ? active.actors[Container] != 0
-                                               : active.actors[Npc] != 0;
+    bool complete = landmarkEvent(saved.kind) ? !rewardChest || active.actors[Container] != 0
+                    : saved.kind == Kind::Ambush ? active.actors[0] != 0
+                    : chestEvent(saved.kind)     ? active.actors[Container] != 0
+                                                 : active.actors[Npc] != 0;
     complete &= saved.kind != Kind::Battle || active.actors[Companion] != 0;
     complete &= saved.kind != Kind::ChestSack || active.actors[Object] != 0;
     complete &= saved.kind != Kind::Rescue || saved.rewardClaimed || active.actors[Object] != 0;
@@ -700,7 +745,7 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
     auto say = [&](const wchar_t *text) {
         value.bridge.dialogue(game, game->world->local_creature, text);
     };
-    if (unfinished(value) >= value.cap) {
+    if (unfinished(value, false) >= value.cap) {
         say(L"Event limit reached. Finish an active encounter before testing another.");
         value.requestedTest = Kind::Count;
         return;
@@ -760,6 +805,131 @@ static void testEncounter(Data &value, cube::Game *game, Site player, Region reg
         value.requestedTest = Kind::Count;
     }
 }
+// The landmark record for a native location: the slot already bound to it,
+// or a free reserved slot of its region (then bound to it via previousSite).
+static EventRecord *landmarkRecord(Data &value, Region area, Site center) {
+    auto start = unsigned(mix(uint64_t(center.x) * 0x9e3779b1ull ^ uint64_t(center.y)) %
+                          LandmarkSlots);
+    int freeSlot = -1;
+    for (unsigned i = 0; i < LandmarkSlots; ++i) {
+        unsigned slot = FirstLandmarkSlot + (start + i) % LandmarkSlots;
+        const auto *existing = value.state.find(value.world, area, slot);
+        if (existing && (within(existing->previousSite, center, 16) ||
+                         (existing->planned && within(existing->site, center, 16))))
+            return &value.state.get(value.world, area, slot);
+        bool unused = !existing || (!existing->planned && !existing->rewardClaimed &&
+                                    !existing->failed && !existing->previousSite.x &&
+                                    !existing->previousSite.y);
+        if (unused && freeSlot < 0 &&
+            (existing || value.state.size() < StateStore::MaxRecords))
+            freeSlot = int(slot);
+    }
+    if (freeSlot < 0)
+        return nullptr;
+    auto &saved = value.state.get(value.world, area, unsigned(freeSlot));
+    saved.previousSite = center;
+    value.dirty = true;
+    return &saved;
+}
+// Landmark encounters: a Hill, Camp or Shrine-type native location close to the
+// player gets an encounter at the location itself. Runs under the terrain lock.
+static void planLandmarks(Data &value, cube::Game *game, Site player, uint64_t now,
+                          std::vector<SpawnRequest> &pending) {
+    unsigned running = unfinished(value, true);
+    for (const auto &request : pending)
+        running += landmarkEvent(record(value, request.key).kind);
+    // A native location query returns the location of the query point's own
+    // 1024-block cell, and only within about 280 blocks of its center. Any
+    // quarter of that disc holds a point of a 128-block lattice, so 7x7
+    // queries find every location within 160 blocks, even at cell corners.
+    // The query reads the world plan only; it does not generate terrain.
+    std::vector<std::pair<Kind, Site>> found;
+    for (int dx = -3; dx <= 3; ++dx)
+        for (int dy = -3; dy <= 3; ++dy) {
+            auto location =
+                native::location(game->world, {player.x + dx * 128, player.y + dy * 128});
+            Kind kind;
+            Site center{location.x, location.y};
+            if (!landmarkKind(location.type, kind))
+                continue;
+            bool known = false;
+            for (const auto &entry : found)
+                known |= entry.second.x == center.x && entry.second.y == center.y;
+            if (!known)
+                found.push_back({kind, center});
+        }
+    if (value.reportLandmarks) {
+        value.reportLandmarks = false;
+        char message[160];
+        snprintf(message, sizeof(message), "Landmarks near you: %zu.", found.size());
+        log(message);
+        for (const auto &[kind, center] : found) {
+            auto dx = double(center.x - player.x), dy = double(center.y - player.y);
+            snprintf(message, sizeof(message), "  kind=%u at engine blocks %lld,%lld (%.0f away)",
+                     unsigned(kind), center.x, center.y, std::hypot(dx, dy));
+            log(message);
+        }
+    }
+    unsigned searches = 0;
+    for (const auto &[kind, center] : found) {
+        // Only locations close enough to have loaded terrain; at most two
+        // placement searches per second.
+        if (running >= value.landmarkCap || searches >= 2)
+            return;
+        if (!within(player, center, 160))
+            continue;
+        auto area = native::region(game->world, center);
+        auto saved = landmarkRecord(value, area, center);
+        if (!saved)
+            continue;
+        EventKey key{value.world, area, saved->slot};
+        bool busy = false;
+        for (const auto &active : value.active)
+            busy |= active.key == key;
+        for (const auto &request : pending)
+            busy |= request.key == key;
+        if (busy || (saved->planned && !saved->rewardClaimed && !saved->failed))
+            continue;
+        if (saved->rewardClaimed || saved->failed) {
+            // A finished landmark returns after its cooldown, as a new cycle.
+            if (now < saved->deadlineUTCsecs)
+                continue;
+            auto cycle = saved->cycle + 1;
+            *saved = EventRecord{};
+            saved->world = key.world;
+            saved->region = area;
+            saved->slot = key.slot;
+            saved->cycle = cycle;
+            saved->previousSite = center;
+            value.dirty = true;
+        }
+        ++searches;
+        auto roll = plan(value.world, area, saved->slot, saved->cycle).roll;
+        auto candidate = *saved;
+        candidate.kind = kind;
+        candidate.enemyCount = landmarkEnemies(kind, roll);
+        std::array<LongVector3, ActorCount> points{};
+        static const Site nudges[] = {{0, 0},  {6, 0},  {-6, 0}, {0, 6},
+                                      {0, -6}, {8, 8},  {-8, 8}, {8, -8}};
+        bool placed = false;
+        for (const auto &nudge : nudges) {
+            candidate.site = {center.x + nudge.x, center.y + nudge.y};
+            if (siteAvailable(value.state, key, candidate.site, now) &&
+                place(game, candidate, points) &&
+                chooseEnemies(game, area, value, roll, candidate)) {
+                placed = true;
+                break;
+            }
+        }
+        if (!placed)
+            continue;
+        candidate.planned = true;
+        *saved = candidate;
+        value.dirty = true;
+        pending.push_back({key, points});
+        ++running;
+    }
+}
 static void tick(cube::Game *game) {
     auto &value = data();
     std::lock_guard<std::recursive_mutex> guard(value.gate);
@@ -770,6 +940,7 @@ static void tick(cube::Game *game) {
         if (value.loaded)
             flush(value);
         value.session = nullptr;
+        mapmarkers::publish(nullptr, {});
         value.active.clear();
         value.spawned.clear();
         value.referrals.clear();
@@ -871,7 +1042,7 @@ static void tick(cube::Game *game) {
                         saved.previousSite = previous;
                         value.dirty = true;
                     }
-                    if (testing || unfinished(value) + pending.size() >= value.cap)
+                    if (testing || unfinished(value, false) + pending.size() >= value.cap)
                         continue;
                     if (exists)
                         continue;
@@ -915,11 +1086,14 @@ static void tick(cube::Game *game) {
                     value.dirty = true;
                     pending.push_back({{saved.world, saved.region, saved.slot}, points});
                 }
+        if (!testing)
+            planLandmarks(value, game, player, now, pending);
     }
     // Construct native actors only after releasing terrain locks. Appearance,
     // dialogue and host registration can enter other engine subsystems.
     for (const auto &request : pending)
         spawn(value, game, record(value, request.key), request.points);
+    publishMarkers(value, game);
     flush(value);
 }
 static void death(cube::Game *game, cube::Creature *creature) {
@@ -945,7 +1119,7 @@ static void death(cube::Game *game, cube::Creature *creature) {
                 (saved.defeatedMask & (1u << enemy)))
                 continue;
             saved.defeatedMask |= 1u << enemy;
-            if (guardianEvent(saved.kind))
+            if (leader(saved.kind, enemy))
                 unregisterGuardian(value, active.actors[enemy]);
             if (objectiveComplete(saved.enemyCount, saved.defeatedMask)) {
                 if (saved.kind == Kind::ChestBoss)
@@ -1065,7 +1239,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
         describeReferral(value, game, creature, saved);
         return 1;
     }
-    if (unfinished(value) >= value.cap)
+    if (unfinished(value, false) >= value.cap)
         return 0;
     auto selected = unusedSlot(value, region);
     if (!selected)
@@ -1126,8 +1300,9 @@ static int interaction(cube::Game *game, cube::Creature *creature) {
         if (saved.failed)
             return 1;
         if (saved.rewardClaimed) {
-            say(chestEvent(saved.kind) ? L"The chest has been emptied."
-                                       : L"Thank you for your help. Safe travels!");
+            say(chestEvent(saved.kind) || landmarkEvent(saved.kind)
+                    ? L"The chest has been emptied."
+                    : L"Thank you for your help. Safe travels!");
             return 1;
         }
         if (actor == Object && saved.kind == Kind::ChestSack) {
@@ -1136,6 +1311,24 @@ static int interaction(cube::Game *game, cube::Creature *creature) {
             else
                 say(L"The sack is empty.");
             flush(value);
+            return 1;
+        }
+        if (actor == Container && landmarkEvent(saved.kind)) {
+            // The reward chest only exists once the group has fallen.
+            if (!saved.objectiveDone) {
+                say(L"Defeat the guardian and its followers first.");
+                return 1;
+            }
+            if (deliver(value, game, saved, active)) {
+                for (auto world : {&game->host.world, game->world})
+                    if (auto chest = world ? native::resident(*world, active.actors[Container])
+                                           : nullptr) {
+                        chest->entity_data.interaction_state = 2;
+                        chest->entity_data.binary_toggles &= ~MapMarker;
+                    }
+                say(L"You found equipment inside the chest.");
+            } else
+                say(L"Please try opening the chest again in a moment.");
             return 1;
         }
         if (actor == Container && chestEvent(saved.kind)) {
@@ -1216,12 +1409,23 @@ static void initialize() {
     value.slots = unsigned(std::clamp(setting(L"EventsPerRegion", 3), 1, 8));
     value.cap = unsigned(std::clamp(setting(L"ActiveEventCap", 2), 1, 3));
     value.cooldown = unsigned(std::clamp(setting(L"CooldownMinutes", 120), 30, 1440));
+    value.landmarkCap = unsigned(std::clamp(setting(L"LandmarkEventCap", 2), 0, 4));
     if (value.enabled && setting(L"ReplaceTravelLocations", 1)) {
         std::string error;
         if (!travel::initialize(&error))
             log(error.c_str());
         else
             log("Original glider/boat/reins/boots sites now generate native dungeons.");
+    }
+    if (value.enabled && setting(L"MapMarkers", 1)) {
+        std::string error;
+        wchar_t sprite[32]{};
+        GetPrivateProfileStringW(L"OverworldEvents", L"MapMarkerSprite", L"missiontag", sprite,
+                                 32, L".\\Mods\\OverworldEvents.ini");
+        if (!mapmarkers::initialize(sprite, &error))
+            log(error.c_str());
+        else
+            log("World-map objective icons installed; the first map frame logs what it draws.");
     }
     log(value.enabled ? "OverworldEvents initialized; native assets resolved on world entry."
                       : "OverworldEvents disabled or unsupported Steam executable.");
@@ -1240,6 +1444,10 @@ static int chat(std::wstring *message) {
             value.testAttempt = 0;
             return 1;
         }
+    if (*message == L"/events landmarks") {
+        value.reportLandmarks = true;
+        return 1;
+    }
     if (*message == L"/events status") {
         char status[180];
         snprintf(status, sizeof(status),

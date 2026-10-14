@@ -50,6 +50,36 @@ void same(const EventRecord &a, const EventRecord &b) {
 } // namespace
 
 int main() {
+    {
+        // Landmark records: a leader plus 2-5 followers, saved and reloaded.
+        StateStore landmarks;
+        auto &hill = landmarks.get(42, {3, -4}, FirstLandmarkSlot + 5);
+        hill.kind = Kind::Hill;
+        hill.planned = true;
+        hill.enemyCount = 5;
+        hill.site = {24600, -32700};
+        hill.previousSite = {24597, -32702};
+        for (unsigned i = 0; i < 5; ++i)
+            hill.enemyRaces[i] = 40 + i;
+        assert(StateStore::valid(hill));
+        auto shrine = hill;
+        shrine.kind = Kind::Shrine;
+        shrine.enemyCount = 3;
+        shrine.enemyRaces[3] = shrine.enemyRaces[4] = 0;
+        assert(StateStore::valid(shrine));
+        shrine.enemyCount = 2;
+        shrine.enemyRaces[2] = 0;
+        assert(!StateStore::valid(shrine)); // A landmark always has followers.
+        auto file = std::filesystem::temp_directory_path() /
+                    (L"OverworldEvents-Landmark-" + std::to_wstring(GetCurrentProcessId()) + L".txt");
+        assert(landmarks.save(file));
+        StateStore reloaded;
+        assert(reloaded.load(file));
+        auto *back = reloaded.find(42, {3, -4}, FirstLandmarkSlot + 5);
+        assert(back && back->kind == Kind::Hill && back->enemyCount == 5 &&
+               back->previousSite.x == 24597 && back->site.y == -32700);
+        std::filesystem::remove(file);
+    }
     auto directory = std::filesystem::temp_directory_path() /
                      (L"OverworldEvents-StateStoreTest-" + std::to_wstring(GetCurrentProcessId()) +
                       L"-" + std::to_wstring(GetTickCount64()));
