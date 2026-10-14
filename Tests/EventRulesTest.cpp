@@ -59,5 +59,25 @@ int main() {
         assert(within(site, {-105694681, 64965890}, 192));
         assert(!within(site, {-105694681, 64965890}, 48));
     }
+    // Landmarks: verified native location types, lakes and villages excluded.
+    Kind landmark = Kind::Count;
+    for (int type : {18, 28, 29, 31})
+        assert(landmarkKind(type, landmark) && landmark == Kind::Hill);
+    for (int type : {34, 35})
+        assert(landmarkKind(type, landmark) && landmark == Kind::Camp);
+    for (int type : {9, 16, 37, 38, 39})
+        assert(landmarkKind(type, landmark) && landmark == Kind::Shrine);
+    for (int type : {0, 4, 5, 7, 8, 12, 13, 14, 15, 40, 47})
+        assert(!landmarkKind(type, landmark));
+    for (uint64_t roll = 0; roll < 64; ++roll) {
+        auto hill = landmarkEnemies(Kind::Hill, roll << 16);
+        auto camp = landmarkEnemies(Kind::Camp, roll << 16);
+        auto shrine = landmarkEnemies(Kind::Shrine, roll << 16);
+        assert(hill >= 4 && hill <= 6 && camp >= 5 && camp <= 6 && shrine >= 3 && shrine <= 4);
+    }
+    assert(landmarkEnemies(Kind::Battle, 0) == 0);
+    assert(leader(Kind::Hill, 0) && !leader(Kind::Hill, 1) && leader(Kind::Bounty, 0));
+    assert(!leader(Kind::Battle, 0) && !landmarkEvent(Kind::Ambush) && landmarkEvent(Kind::Camp));
+    assert(FirstLandmarkSlot + LandmarkSlots <= 32);
     puts("Regional relocation, stable active plans, enemy caps, objectives and cooldown: PASS");
 }

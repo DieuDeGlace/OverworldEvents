@@ -149,7 +149,8 @@ bool StateStore::valid(const EventRecord &record) {
         return false;
     if ((record.kind == Kind::ChestSack && record.enemyCount != 0) ||
         (groupEvent(record.kind) && record.enemyCount != 0 && record.enemyCount < 4) ||
-        (!groupEvent(record.kind) && record.enemyCount > 1) ||
+        (landmarkEvent(record.kind) && record.enemyCount != 0 && record.enemyCount < 3) ||
+        (!groupEvent(record.kind) && !landmarkEvent(record.kind) && record.enemyCount > 1) ||
         (record.planned && record.kind != Kind::ChestSack && record.enemyCount == 0))
         return false;
     auto health = [](float value) { return std::isfinite(value) && value >= 0.f && value <= 1.f; };

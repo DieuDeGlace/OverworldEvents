@@ -7,7 +7,20 @@ namespace encounters {
 // Steam's native owner function uses 8192-block cells with warped boundaries.
 // The native owner check remains authoritative at a candidate's actual site.
 constexpr int RegionBlocks = 8192;
-enum class Kind : unsigned { Battle, Rescue, Bounty, ChestSack, ChestBoss, Ambush, Count };
+// Landmark kinds are anchored at a native location instead of a random site.
+// They follow Ambush so that stored kind numbers of older records stay valid.
+enum class Kind : unsigned {
+    Battle,
+    Rescue,
+    Bounty,
+    ChestSack,
+    ChestBoss,
+    Ambush,
+    Hill,   // Hill, Canyon, Crater, Rocks: a named boss and its pack.
+    Camp,   // Camp, Bandit Camp: a leader and a larger group.
+    Shrine, // Altar, Sanctuary, Menhir, Circle of Power, Graveyard: a guardian.
+    Count
+};
 constexpr unsigned NaturalKindCount = unsigned(Kind::Ambush);
 inline bool groupEvent(Kind kind) {
     return kind == Kind::Battle || kind == Kind::Ambush;
@@ -15,6 +28,56 @@ inline bool groupEvent(Kind kind) {
 inline bool guardianEvent(Kind kind) {
     return kind == Kind::Rescue || kind == Kind::Bounty || kind == Kind::ChestBoss;
 }
+inline bool landmarkEvent(Kind kind) {
+    return kind == Kind::Hill || kind == Kind::Camp || kind == Kind::Shrine;
+}
+// The named boss of an encounter: a guardian, or a landmark group's leader
+// (always enemy slot 0).
+inline bool leader(Kind kind, unsigned enemy) {
+    return guardianEvent(kind) || (landmarkEvent(kind) && enemy == 0);
+}
+// Native location types (dictionary names verified in the executable) that
+// host a landmark encounter. Lakes stay with CubeMegaMod's lake encounters;
+// villages, dungeons and every other type are left alone.
+inline bool landmarkKind(int locationType, Kind &kind) {
+    switch (locationType) {
+    case 18: // Crater
+    case 28: // Canyon
+    case 29: // Rocks
+    case 31: // Hill
+        kind = Kind::Hill;
+        return true;
+    case 34: // Camp
+    case 35: // BanditCamp
+        kind = Kind::Camp;
+        return true;
+    case 9:  // Graveyard
+    case 16: // CircleOfPower
+    case 37: // Altar
+    case 38: // Sanctuary
+    case 39: // Menhir
+        kind = Kind::Shrine;
+        return true;
+    default:
+        return false;
+    }
+}
+// Group size including the leader.
+inline unsigned landmarkEnemies(Kind kind, uint64_t roll) {
+    switch (kind) {
+    case Kind::Hill:
+        return 4 + unsigned((roll >> 16) % 3); // Boss + 3-5.
+    case Kind::Camp:
+        return 5 + unsigned((roll >> 16) % 2); // Leader + 4-5.
+    case Kind::Shrine:
+        return 3 + unsigned((roll >> 16) % 2); // Guardian + 2-3.
+    default:
+        return 0;
+    }
+}
+// Landmark records use these per-region slots; random encounters use the
+// lower ones (EventsPerRegion is at most 8).
+constexpr unsigned FirstLandmarkSlot = 8, LandmarkSlots = 24;
 struct Region {
     int x = 0, y = 0;
 };
