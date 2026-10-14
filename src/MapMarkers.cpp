@@ -28,7 +28,25 @@ constexpr size_t Color = 0x44;                        // RGBA floats.
 constexpr size_t Position = 0x60;                     // int32 x, y, z in blocks.
 constexpr size_t Sprite = 0x70;                       // plasma::Node *.
 constexpr size_t SpriteSpare = 0x78, Tail = 0x88;     // Zeroed by every native push.
+constexpr size_t Scale = 0x40;                        // float icon scale.
+constexpr size_t Screen = 0x54;                       // float x, y, depth: where it is drawn.
 constexpr ptrdiff_t VectorBegin = -0x48, VectorEnd = -0x40;
+
+// Native projection of a map icon, from the treasure-icon push (0x2855b0-0x2859aa):
+//   rel   = (dots - map center) * trunc(65536 / zoom) / 65536, then / 65536 as float
+//   view  = Transform(matrices + 0x58, rel)     (behind the camera: not drawn)
+//   ndc   = Transform(matrices + 0x18, view)    (outside [-1, 1]: not drawn)
+//   x, y  = ndc * (+W/2, -H/2) + (W/2, H/2);   depth = ndc.z / 2
+//   scale = clamp(64 / zoom * focus / 2.5, 0.66, 1); below 0.3 it is not drawn
+constexpr size_t MapHolder = 0x1a8;  // map object -> sprite/camera holder (the GUI)
+constexpr size_t MapScreen = 0x8;    // map object -> screen with width/height
+constexpr size_t ScreenWidth = 0x1c4, ScreenHeight = 0x1c8;
+constexpr size_t MapCenter = 0x1e20; // holder: int64 x, y, z in dots
+constexpr size_t MapFocus = 0x1e50;  // holder: float
+constexpr size_t Matrices = 0x10, ViewMatrix = 0x58, ProjectionMatrix = 0x18;
+constexpr size_t TreasureSlot = 0x4a0;
+constexpr ptrdiff_t ZoomFrame = -0x78; // int, the map routine's zoom (r12 in the loop)
+constexpr uintptr_t TransformRva = 0x2b680; // (matrix, out vec3, in vec3) -> out
 
 // GUI sprite slots the map draws icons with (verified against the native
 // sprite-name loader: enemy 0x348 ... demonportal 0x4b0, plus the location
@@ -77,7 +95,8 @@ void diagnose(int state, size_t icons, size_t added) {
         return;
     static const char *text[] = {"no markers to draw", "marker sprite missing",
                                  "icon list rejected", "no native template icon in list",
-                                 "markers added"};
+                                 "markers added", "map sprite table mismatch",
+                                 "markers outside the visible map"};
     char message[192];
     snprintf(message, sizeof(message), "Map icons: %s (native icons=%zu, added=%zu, sprite=%s).",
              text[state], icons, added, spriteName);
@@ -88,8 +107,50 @@ void diagnose(int state, size_t icons, size_t added) {
         fclose(file);
     }
 }
-// Called from the hook with the map routine's frame pointer.
-void draw(unsigned char *frame) {
+template <class T> T read(const unsigned char *at) {
+    T value;
+    std::memcpy(&value, at, sizeof(value));
+    return value;
+}
+// Screen position, depth and scale of a world point, exactly as the native map
+// computes them for its own icons. False when the point is not visible.
+bool project(const unsigned char *map, const unsigned char *holder, int zoom,
+             const Marker &marker, float screen[3], float &scale) {
+    auto view = read<const unsigned char *>(map + MapScreen);
+    auto matrices = read<unsigned char *>(holder + Matrices);
+    if (!view || !matrices || zoom <= 0 || zoom > (1 << 20))
+        return false;
+    const int64_t world[3] = {int64_t(marker.x) * 65536 + 32768,
+                              int64_t(marker.y) * 65536 + 32768, int64_t(marker.z) * 65536};
+    auto factor = int64_t(1.0 / zoom * 65536.0);
+    float relative[3];
+    for (int i = 0; i < 3; ++i) {
+        int64_t center = read<int64_t>(holder + MapCenter + 8 * i);
+        relative[i] = float((world[i] - center) * factor / 65536) * (1.f / 65536.f);
+    }
+    using Transform = float *(*)(void *, float *, const float *);
+    auto transform = reinterpret_cast<Transform>(native::base() + TransformRva);
+    float eye[3], ndc[3];
+    const float *p = transform(matrices + ViewMatrix, eye, relative);
+    if (!p || !(p[2] > 0.f))
+        return false;
+    std::memcpy(eye, p, sizeof(eye));
+    p = transform(matrices + ProjectionMatrix, ndc, eye);
+    if (!p || p[0] < -1.f || p[0] > 1.f || p[1] < -1.f || p[1] > 1.f)
+        return false;
+    float width = float(read<int>(view + ScreenWidth)) * .5f,
+          height = float(read<int>(view + ScreenHeight)) * .5f;
+    screen[0] = p[0] * width + width;
+    screen[1] = p[1] * -height + height;
+    screen[2] = p[2] * .5f;
+    float size = 64.f / float(zoom) * read<float>(holder + MapFocus) / 2.5f;
+    if (size < .3f)
+        return false;
+    scale = std::min(1.f, std::max(.66f, size));
+    return true;
+}
+// Called from the hook with the map routine's frame pointer and map object.
+void draw(unsigned char *frame, unsigned char *map) {
     std::unique_lock<std::mutex> lock(gate, std::try_to_lock);
     if (!lock.owns_lock())
         return; // Never block the render path.
@@ -116,6 +177,11 @@ void draw(unsigned char *frame) {
     }
     if (!templateIcon)
         return diagnose(3, icons, 0);
+    // The map's holder must be the GUI's sprite table this layout was built on.
+    auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
+    if (!holder || read<void *>(holder + TreasureSlot) != guiSlot(game->gui, TreasureSlot))
+        return diagnose(5, icons, 0);
+    int zoom = read<int>(frame + ZoomFrame);
     alignas(16) unsigned char icon[IconSize];
     std::memcpy(icon, templateIcon, IconSize);
     emptyText(icon + FirstText);
@@ -126,15 +192,22 @@ void draw(unsigned char *frame) {
     const float yellow[4] = {1.f, .82f, .12f, 1.f};
     std::memcpy(icon + Color, yellow, sizeof(yellow));
     auto push = reinterpret_cast<void (*)(void *, const void *)>(native::base() + PushRva);
+    size_t added = 0;
     for (const auto &marker : markers) {
+        float screen[3], scale;
+        if (!project(map, holder, zoom, marker, screen, scale))
+            continue; // Off the visible map, as native icons are.
         const int32_t position[3] = {marker.x, marker.y, marker.z};
         std::memcpy(icon + Position, position, sizeof(position));
+        std::memcpy(icon + Screen, screen, sizeof(screen));
+        std::memcpy(icon + Scale, &scale, sizeof(scale));
         push(frame + VectorBegin, icon); // Copies; the inline empty strings own nothing.
+        ++added;
     }
-    diagnose(4, icons, markers.size());
+    diagnose(added ? 4 : 6, icons, added);
 }
 
-// Machine code: save volatile registers, call draw(rbp), restore, then run the
+// Machine code: save volatile registers, call draw(rbp, r13), restore, then run the
 // four displaced instructions (they re-read the possibly grown vector) and
 // jump back.
 bool buildStub(unsigned char *out, size_t &size) {
@@ -155,6 +228,7 @@ bool buildStub(unsigned char *out, size_t &size) {
     for (int i = 0; i < 6; ++i) // movdqu [rsp+0x20+16i], xmm0..xmm5
         bytes({0xf3, 0x0f, 0x7f, save[i], 0x24, (unsigned char)(0x20 + 16 * i)});
     bytes({0x48, 0x89, 0xe9}); // mov rcx, rbp
+    bytes({0x4c, 0x89, 0xea}); // mov rdx, r13 (the map object, kept by the routine)
     bytes({0x48, 0xb8});       // mov rax, draw
     imm64(uint64_t(&draw));
     bytes({0xff, 0xd0}); // call rax
