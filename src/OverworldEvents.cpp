@@ -7,6 +7,7 @@
 #include "InstanceRules.h"
 #include "MapMarkers.h"
 #include "TownRules.h"
+#include "DialogueRules.h"
 #include "NativeWorld.h"
 #include "RuntimeAssets.h"
 #include "StateStore.h"
@@ -1214,18 +1215,25 @@ static bool deliver(Data &value, cube::Game *game, EventRecord &saved, const Act
     }
     return true;
 }
+// One of five lines for this situation (see DialogueRules.h), at random but
+// never the same line twice in a row from the same villager.
+static const wchar_t *line(cube::Creature *speaker, dialogue::Topic topic, Kind kind) {
+    static dialogue::Picker picker;
+    static uint64_t counter = 0;
+    auto random = mix(GetTickCount64() ^ (++counter << 32) ^ uint64_t(speaker->id));
+    return dialogue::pool(topic, kind)[picker.pick(uint64_t(speaker->id), topic, kind, random)];
+}
+// Offers a town-referred event (offer=true) or reminds the player of one
+// already taken, with the distance to its objective area.
 static void describeReferral(Data &value, cube::Game *game, cube::Creature *speaker,
-                             const EventRecord &saved) {
+                             const EventRecord &saved, bool offer) {
     auto origin = native::position(speaker);
     auto distance = std::hypot(double(saved.site.x - origin.x), double(saved.site.y - origin.y));
-    const wchar_t *request = saved.kind == Kind::Rescue   ? L"Free the trapped adventurer"
-                             : saved.kind == Kind::Battle ? L"Help the adventurers in battle"
-                                                          : L"Defeat the enemy group";
-    wchar_t message[256];
+    wchar_t message[320];
     swprintf_s(message,
-               L"%s about %.0f blocks from here. The objective area is marked on your map. "
-               L"Return to town and speak to us afterward for your reward.",
-               request, distance);
+               line(speaker, offer ? dialogue::Topic::Offer : dialogue::Topic::Reminder,
+                    saved.kind),
+               distance);
     value.bridge.dialogue(game, speaker, message);
 }
 static int townInteraction(Data &value, cube::Game *game, cube::Creature *creature) {
@@ -1255,11 +1263,11 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
         }
         auto say = [&](const wchar_t *words) { value.bridge.dialogue(game, creature, words); };
         if (saved.rewardClaimed)
-            say(L"Thank you for helping. Safe travels!");
+            say(line(creature, dialogue::Topic::Thanks, saved.kind));
         else if (saved.failed)
-            say(L"That encounter is over. We will have more news another time.");
+            say(line(creature, dialogue::Topic::Over, saved.kind));
         else if (!saved.objectiveDone)
-            describeReferral(value, game, creature, saved);
+            describeReferral(value, game, creature, saved, false);
         else {
             auto active =
                 std::find_if(value.active.begin(), value.active.end(), [&](const Active &entry) {
@@ -1269,7 +1277,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
                 if (saved.kind == Kind::Rescue)
                     freeRescue(game, *active);
                 objectiveMarker(game, saved, *active);
-                say(L"Thank you. This equipment is your reward.");
+                say(line(creature, dialogue::Topic::Reward, saved.kind));
             } else
                 say(L"Your reward is not ready. Please speak to me again in a moment.");
         }
@@ -1283,7 +1291,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
             !sameRegion(saved.region, region) || !town::referralKind(saved.kind))
             continue;
         value.referrals.push_back({center, active.key, saved.cycle});
-        describeReferral(value, game, creature, saved);
+        describeReferral(value, game, creature, saved, true);
         return 1;
     }
     if (unfinished(value, false) >= value.cap)
@@ -1322,7 +1330,7 @@ static int townInteraction(Data &value, cube::Game *game, cube::Creature *creatu
     spawn(value, game, *selected, points);
     value.referrals.push_back(
         {center, {candidate.world, candidate.region, candidate.slot}, candidate.cycle});
-    describeReferral(value, game, creature, *selected);
+    describeReferral(value, game, creature, *selected, true);
     flush(value);
     return 1;
 }
