@@ -19,7 +19,9 @@ inline bool supported() {
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(memory + dos->e_lfanew);
     return nt->Signature == IMAGE_NT_SIGNATURE &&
            nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-           nt->FileHeader.TimeDateStamp == 0x5d93ab0d && nt->OptionalHeader.SizeOfImage == 0x5b7000;
+           nt->FileHeader.TimeDateStamp == 0x5d93ab0d &&
+           (nt->OptionalHeader.SizeOfImage == 0x5b7000 || // PC (SteamStub .bind section)
+            nt->OptionalHeader.SizeOfImage == 0x58a000);  // GameNative (section stripped)
 }
 struct Location {
     int type;
