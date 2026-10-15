@@ -38,13 +38,16 @@ constexpr ptrdiff_t VectorBegin = -0x48, VectorEnd = -0x40;
 //   ndc   = Transform(matrices + 0x18, view)    (outside [-1, 1]: not drawn)
 //   x, y  = ndc * (+W/2, -H/2) + (W/2, H/2);   depth = ndc.z / 2
 //   scale = clamp(64 / zoom * focus / 2.5, 0.66, 1); below 0.3 it is not drawn
-constexpr size_t MapHolder = 0x1a8;  // map object -> sprite/camera holder (the GUI)
+// map object -> its sprite/camera holder. The native map reads every icon
+// sprite from this table (treasure at +0x4a0); the native sprite-name loader
+// fills it at the same offsets. The SDK's cube::Game::gui does not line up with
+// it, so sprites are always taken from here.
+constexpr size_t MapHolder = 0x1a8;
 constexpr size_t MapScreen = 0x8;    // map object -> screen with width/height
 constexpr size_t ScreenWidth = 0x1c4, ScreenHeight = 0x1c8;
 constexpr size_t MapCenter = 0x1e20; // holder: int64 x, y, z in dots
 constexpr size_t MapFocus = 0x1e50;  // holder: float
 constexpr size_t Matrices = 0x10, ViewMatrix = 0x58, ProjectionMatrix = 0x18;
-constexpr size_t TreasureSlot = 0x4a0;
 constexpr ptrdiff_t ZoomFrame = -0x78; // int, the map routine's zoom (r12 in the loop)
 constexpr uintptr_t TransformRva = 0x2b680; // (matrix, out vec3, in vec3) -> out
 
@@ -75,16 +78,16 @@ void emptyText(unsigned char *text) {
     const uint64_t capacity = 7;
     std::memcpy(text + 0x18, &capacity, sizeof(capacity));
 }
-void *guiSlot(const cube::GUI &gui, size_t offset) {
+void *slot(const unsigned char *holder, size_t offset) {
     void *value;
-    std::memcpy(&value, reinterpret_cast<const unsigned char *>(&gui) + offset, sizeof(value));
+    std::memcpy(&value, holder + offset, sizeof(value));
     return value;
 }
-bool mapSprite(const cube::GUI &gui, const void *sprite) {
+bool mapSprite(const unsigned char *holder, const void *sprite) {
     if (!sprite)
         return false;
     for (size_t offset = FirstMapSprite; offset < MapSpriteEnd; offset += sizeof(void *))
-        if (guiSlot(gui, offset) == sprite)
+        if (slot(holder, offset) == sprite)
             return true;
     return false;
 }
@@ -156,7 +159,8 @@ void draw(unsigned char *frame, unsigned char *map) {
         return; // Never block the render path.
     if (markers.empty() || !game)
         return diagnose(0, 0, 0);
-    void *marker = guiSlot(game->gui, spriteOffset);
+    auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
+    void *marker = holder ? slot(holder, spriteOffset) : nullptr;
     if (!marker)
         return diagnose(1, 0, 0);
     unsigned char *begin, *end;
@@ -165,22 +169,17 @@ void draw(unsigned char *frame, unsigned char *map) {
     if (!begin || end < begin || (end - begin) % IconSize || size_t(end - begin) / IconSize > 8192)
         return diagnose(2, 0, 0);
     size_t icons = size_t(end - begin) / IconSize;
-    // Use a native icon of this frame as the template for scale, offsets and
-    // flags; its sprite must be one of the GUI's map sprites, which validates
-    // the layout.
+    // Use a native icon of this frame as the template for flags; its sprite
+    // must be one of the holder's map sprites, which validates the layout.
     const unsigned char *templateIcon = nullptr;
     for (auto icon = begin; icon < end && !templateIcon; icon += IconSize) {
         void *sprite;
         std::memcpy(&sprite, icon + Sprite, sizeof(sprite));
-        if (mapSprite(game->gui, sprite))
+        if (mapSprite(holder, sprite))
             templateIcon = icon;
     }
     if (!templateIcon)
         return diagnose(3, icons, 0);
-    // The map's holder must be the GUI's sprite table this layout was built on.
-    auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
-    if (!holder || read<void *>(holder + TreasureSlot) != guiSlot(game->gui, TreasureSlot))
-        return diagnose(5, icons, 0);
     int zoom = read<int>(frame + ZoomFrame);
     alignas(16) unsigned char icon[IconSize];
     std::memcpy(icon, templateIcon, IconSize);
