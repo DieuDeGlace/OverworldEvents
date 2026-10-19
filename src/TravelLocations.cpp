@@ -92,7 +92,7 @@ std::shared_ptr<const Choices> choices(cube::World *world, Region owner) {
     if (quests.size() > 4096)
         return {};
     for (const auto &quest : quests)
-        if (isTravelQuest(quest.second))
+        if (isUtilityQuest(quest.second))
             result->emplace(gridKey(quest.first[0], quest.first[1]), quest.second);
     std::lock_guard lock(choicesMutex);
     if (choicesCache.size() >= 128)
@@ -127,7 +127,9 @@ int classify(cube::World *world, int x, int y, bool ocean) {
                 native::base() + 0x362a0)(world, &center, normalizedX, normalizedY, ocean);
             auto owner = native::region(world, {center.x, center.y});
             auto selected = choices(world, owner);
-            if (selected && selected->find(gridKey(normalizedX, normalizedY)) != selected->end())
+            auto found = selected ? selected->find(gridKey(normalizedX, normalizedY))
+                                  : Choices::const_iterator{};
+            if (selected && found != selected->end() && isTravelQuest(found->second))
                 type = dungeonTypes[dungeonIndex(
                     worldIdentity(uint32_t(world->seed), world->world_name), uint32_t(world->seed),
                     normalizedX, normalizedY)];
@@ -223,6 +225,20 @@ void clearCache() {
     std::lock_guard lock(choicesMutex);
     choicesCache.clear();
     revision.fetch_add(1, std::memory_order_release);
+}
+bool utilitySite(cube::World *world, Site query, Site center, bool ocean) {
+    if (!world || !native::supported() || !native::coordinate(query))
+        return true;
+    try {
+        OriginalScope original;
+        auto selected = choices(world, native::region(world, center));
+        if (!selected)
+            return true; // Unknown planner output: leave the location alone.
+        auto found = selected->find(queryGrid(query.x, query.y, ocean));
+        return found != selected->end() && isUtilityQuest(found->second);
+    } catch (...) {
+        return true;
+    }
 }
 bool initialize(std::string *error) {
     if (error)
