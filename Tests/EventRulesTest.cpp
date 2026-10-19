@@ -59,15 +59,17 @@ int main() {
         assert(within(site, {-105694681, 64965890}, 192));
         assert(!within(site, {-105694681, 64965890}, 48));
     }
-    // Landmarks: verified native location types, lakes and villages excluded.
+    // Landmarks: natural native location types; settlements, dungeons, lakes
+    // and mana pumps excluded.
     Kind landmark = Kind::Count;
-    for (int type : {18, 28, 29, 31})
+    for (int type : {10, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 36})
         assert(landmarkKind(type, landmark) && landmark == Kind::Hill);
-    for (int type : {34, 35})
+    for (int type : {22, 34, 35})
         assert(landmarkKind(type, landmark) && landmark == Kind::Camp);
     for (int type : {9, 16, 37, 38, 39})
         assert(landmarkKind(type, landmark) && landmark == Kind::Shrine);
-    for (int type : {0, 4, 5, 7, 8, 12, 13, 14, 15, 40, 47})
+    for (int type : {0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 17, 40, 41, 42, 43, 44, 45,
+                     46, 47, 48})
         assert(!landmarkKind(type, landmark));
     for (uint64_t roll = 0; roll < 64; ++roll) {
         auto hill = landmarkEnemies(Kind::Hill, roll << 16);

@@ -875,8 +875,9 @@ static EventRecord *landmarkRecord(Data &value, Region area, Site center) {
     value.dirty = true;
     return &saved;
 }
-// Landmark encounters: a Hill, Camp or Shrine-type native location close to the
-// player gets an encounter at the location itself. Runs under the terrain lock.
+// Landmark encounters: a natural native location close to the player that holds
+// no utility item gets an encounter at the location itself. Runs under the
+// terrain lock.
 static void planLandmarks(Data &value, cube::Game *game, Site player, uint64_t now,
                           std::vector<SpawnRequest> &pending) {
     unsigned running = unfinished(value, true);
@@ -888,18 +889,25 @@ static void planLandmarks(Data &value, cube::Game *game, Site player, uint64_t n
     // queries find every location within 160 blocks, even at cell corners.
     // The query reads the world plan only; it does not generate terrain.
     std::vector<std::pair<Kind, Site>> found;
+    std::vector<std::pair<int, Site>> utility; // Skipped: they hold a utility item.
+    auto seen = [](const auto &list, Site center) {
+        for (const auto &entry : list)
+            if (entry.second.x == center.x && entry.second.y == center.y)
+                return true;
+        return false;
+    };
     for (int dx = -3; dx <= 3; ++dx)
         for (int dy = -3; dy <= 3; ++dy) {
-            auto location =
-                native::location(game->world, {player.x + dx * 128, player.y + dy * 128});
+            Site query{player.x + dx * 128, player.y + dy * 128};
+            auto location = native::location(game->world, query);
             Kind kind;
             Site center{location.x, location.y};
-            if (!landmarkKind(location.type, kind))
+            if (!landmarkKind(location.type, kind) || seen(found, center) ||
+                seen(utility, center))
                 continue;
-            bool known = false;
-            for (const auto &entry : found)
-                known |= entry.second.x == center.x && entry.second.y == center.y;
-            if (!known)
+            if (travel::utilitySite(game->world, query, center, location.ocean))
+                utility.push_back({location.type, center});
+            else
                 found.push_back({kind, center});
         }
     if (value.reportLandmarks) {
@@ -911,6 +919,14 @@ static void planLandmarks(Data &value, cube::Game *game, Site player, uint64_t n
             auto dx = double(center.x - player.x), dy = double(center.y - player.y);
             snprintf(message, sizeof(message), "  kind=%u at engine blocks %lld,%lld (%.0f away)",
                      unsigned(kind), center.x, center.y, std::hypot(dx, dy));
+            log(message);
+        }
+        for (const auto &[type, center] : utility) {
+            auto dx = double(center.x - player.x), dy = double(center.y - player.y);
+            snprintf(message, sizeof(message),
+                     "  skipped: location type %d holds a utility item, at engine blocks "
+                     "%lld,%lld (%.0f away)",
+                     type, center.x, center.y, std::hypot(dx, dy));
             log(message);
         }
     }
@@ -953,8 +969,12 @@ static void planLandmarks(Data &value, cube::Game *game, Site player, uint64_t n
         candidate.kind = kind;
         candidate.enemyCount = landmarkEnemies(kind, roll);
         std::array<LongVector3, ActorCount> points{};
-        static const Site nudges[] = {{0, 0},  {6, 0},  {-6, 0}, {0, 6},
-                                      {0, -6}, {8, 8},  {-8, 8}, {8, -8}};
+        // Large centerpieces (a mana tree's trunk, a menhir) occupy the exact
+        // center, so the outer rings stand the group beside them instead.
+        static const Site nudges[] = {{0, 0},   {6, 0},   {-6, 0},  {0, 6},   {0, -6},
+                                      {8, 8},   {-8, 8},  {8, -8},  {16, 0},  {-16, 0},
+                                      {0, 16},  {0, -16}, {24, 24}, {-24, 24}, {24, -24},
+                                      {-24, -24}};
         bool placed = false;
         for (const auto &nudge : nudges) {
             candidate.site = {center.x + nudge.x, center.y + nudge.y};

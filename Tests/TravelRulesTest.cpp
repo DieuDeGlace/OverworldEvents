@@ -29,6 +29,14 @@ void rewardRestrictions() {
         assert(!isTravelQuest(value));
     for (int id : {4, 5, 7, 8, 9, 12})
         assert(!isTravelItem(24, id));
+    // Quests 6-13 all place a utility item, so their locations host no landmark.
+    for (int value = -1; value <= 24; ++value)
+        assert(isUtilityQuest(value) == (value >= 6 && value <= 13));
+    // Location queries read 1024-block cells; ocean cells normalize to even.
+    assert(queryGrid(0, 1023, false) == gridKey(0, 0));
+    assert(queryGrid(-1, 1024, false) == gridKey(-1, 1));
+    assert(queryGrid(-1025, 3071, true) == gridKey(-2, 2));
+    assert(queryGrid(1024, -1, true) == gridKey(0, -2));
 }
 void deterministicChoices() {
     auto world = worldIdentity(42, "Test World");

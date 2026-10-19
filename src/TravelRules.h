@@ -16,6 +16,21 @@ inline uint64_t gridKey(int x, int y) {
 inline bool isTravelQuest(int quest) {
     return quest >= 6 && quest <= 9;
 }
+// Native planner quests 6-13 place one of the eight utility items (glider,
+// boat, reins, boots, and category-24 items 5, 7, 8 and 9) at a POI.
+inline bool isUtilityQuest(int quest) {
+    return quest >= 6 && quest <= 13;
+}
+// The planner grid cell that a native location query at block (x, y) reads:
+// 1024-block cells, with ocean cells normalized to their even 2x2 corner.
+inline uint64_t queryGrid(int64_t x, int64_t y, bool ocean) {
+    auto gx = floorDivide(x, 1024), gy = floorDivide(y, 1024);
+    if (ocean) {
+        gx = floorDivide(gx, 2) * 2;
+        gy = floorDivide(gy, 2) * 2;
+    }
+    return gridKey(int(gx), int(gy));
+}
 inline bool isTravelItem(unsigned category, int id) {
     return category == 24 && (id == 1 || id == 2 || id == 3 || id == 18);
 }

@@ -37,16 +37,32 @@ inline bool leader(Kind kind, unsigned enemy) {
     return guardianEvent(kind) || (landmarkEvent(kind) && enemy == 0);
 }
 // Native location types (dictionary names verified in the executable) that
-// host a landmark encounter. Lakes stay with CubeMegaMod's lake encounters;
-// villages, dungeons and every other type are left alone.
+// host a landmark encounter when the native planner put no utility-item quest
+// there. Settlements, dungeons, lakes (CubeMegaMod's lake encounters) and mana
+// pumps (their own native Iron Legion population) are never landmarks; every
+// other natural location is.
 inline bool landmarkKind(int locationType, Kind &kind) {
     switch (locationType) {
+    case 10: // Mountain
     case 18: // Crater
+    case 19: // Volcano
+    case 20: // Tree (mana tree)
+    case 21: // Rock
+    case 23: // Island
+    case 24: // Arena
+    case 25: // Forest
+    case 26: // DarkForest
+    case 27: // EnchantedForest
     case 28: // Canyon
     case 29: // Rocks
+    case 30: // Plain
     case 31: // Hill
+    case 32: // Grove
+    case 33: // Glade
+    case 36: // Beach
         kind = Kind::Hill;
         return true;
+    case 22: // OldHut
     case 34: // Camp
     case 35: // BanditCamp
         kind = Kind::Camp;
