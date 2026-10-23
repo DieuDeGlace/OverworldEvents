@@ -45,7 +45,9 @@ void same(const EventRecord &a, const EventRecord &b) {
            a.keyOwned == b.keyOwned && a.keySearchFound == b.keySearchFound &&
            a.objectiveDone == b.objectiveDone && a.rewardClaimed == b.rewardClaimed &&
            a.deadlineUTCsecs == b.deadlineUTCsecs && a.emptySince == b.emptySince &&
-           a.planned == b.planned && a.failed == b.failed);
+           a.planned == b.planned && a.failed == b.failed && a.townQuest == b.townQuest &&
+           a.awaitingSite == b.awaitingSite && a.town.x == b.town.x && a.town.y == b.town.y &&
+           a.difficultyLevel == b.difficultyLevel);
 }
 } // namespace
 

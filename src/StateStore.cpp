@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "StateStore.h"
+#include "TownRules.h"
 #include <Windows.h>
 #include <charconv>
 #include <cmath>
@@ -47,7 +48,7 @@ bool line(std::istream &stream, std::string &value) {
         value.pop_back();
     return true;
 }
-bool readRecord(const std::string &line, EventRecord &record) {
+bool readRecord(const std::string &line, EventRecord &record, unsigned version) {
     std::istringstream stream(line);
     std::string marker;
     unsigned kind = 0;
@@ -67,8 +68,13 @@ bool readRecord(const std::string &line, EventRecord &record) {
         if (!number(stream, record.enemyRaces[i]) || !number(stream, record.enemyStars[i]) ||
             !number(stream, record.enemyHPFraction[i]))
             return false;
-    return number(stream, record.npcHPFraction) && flag(stream, record.failed) && end(stream) &&
-           StateStore::valid(record);
+    if (!number(stream, record.npcHPFraction) || !flag(stream, record.failed))
+        return false;
+    if (version >= 2 && (!flag(stream, record.townQuest) || !flag(stream, record.awaitingSite) ||
+                         !number(stream, record.town.x) || !number(stream, record.town.y) ||
+                         !number(stream, record.difficultyLevel)))
+        return false;
+    return end(stream) && StateStore::valid(record);
 }
 void writeRecord(std::ostream &stream, const EventRecord &record) {
     stream << "E " << record.world << ' ' << record.region.x << ' ' << record.region.y << ' '
@@ -81,7 +87,9 @@ void writeRecord(std::ostream &stream, const EventRecord &record) {
     for (size_t i = 0; i < record.enemyRaces.size(); ++i)
         stream << ' ' << record.enemyRaces[i] << ' ' << record.enemyStars[i] << ' '
                << record.enemyHPFraction[i];
-    stream << ' ' << record.npcHPFraction << ' ' << record.failed << '\n';
+    stream << ' ' << record.npcHPFraction << ' ' << record.failed << ' ' << record.townQuest
+           << ' ' << record.awaitingSite << ' ' << record.town.x << ' ' << record.town.y
+           << ' ' << record.difficultyLevel << '\n';
 }
 bool atomicWrite(const std::filesystem::path &path, const std::string &text, std::string *error) {
     auto temporary = path;
@@ -125,7 +133,7 @@ size_t StateStore::restartUnfinished(uint64_t world) {
     size_t restarted = 0;
     for (auto &entry : records_) {
         auto &old = entry.second;
-        if (old.world != world || !old.planned || old.rewardClaimed || old.failed)
+        if (old.world != world || !old.planned || old.rewardClaimed || old.failed || old.townQuest)
             continue;
         EventRecord fresh;
         fresh.world = old.world;
@@ -145,7 +153,11 @@ bool StateStore::valid(const EventRecord &record) {
         (record.defeatedMask & ~allEnemies(record.enemyCount)) != 0 ||
         record.deadlineUTCsecs > MaxTimestamp || record.emptySince > MaxTimestamp ||
         !coordinate(record.site.x) || !coordinate(record.site.y) ||
-        !coordinate(record.previousSite.x) || !coordinate(record.previousSite.y))
+        !coordinate(record.previousSite.x) || !coordinate(record.previousSite.y) ||
+        !coordinate(record.town.x) || !coordinate(record.town.y) ||
+        record.difficultyLevel < 1 || record.difficultyLevel > 10000000 ||
+        (record.townQuest && (!record.planned || !town::referralKind(record.kind))) ||
+        (record.awaitingSite && (!record.townQuest || record.objectiveDone)))
         return false;
     if ((record.kind == Kind::ChestSack && record.enemyCount != 0) ||
         (groupEvent(record.kind) && record.enemyCount != 0 && record.enemyCount < 4) ||
@@ -178,7 +190,7 @@ bool StateStore::load(const std::filesystem::path &path, std::string *error) {
     std::string name;
     unsigned version = 0;
     if (!(header >> name) || name != "OverworldEventsState" || !number(header, version) ||
-        version != 1 || !end(header))
+        (version != 1 && version != 2) || !end(header))
         return fail(error, "Unsupported event state format.");
     if (!line(file, textLine))
         return fail(error, "Event state record count is missing.");
@@ -191,7 +203,7 @@ bool StateStore::load(const std::filesystem::path &path, std::string *error) {
     parsed.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         EventRecord record;
-        if (!line(file, textLine) || !readRecord(textLine, record))
+        if (!line(file, textLine) || !readRecord(textLine, record, version))
             return fail(error, "Invalid or truncated event state record.");
         if (!parsed.emplace(EventKey{record.world, record.region, record.slot}, record).second)
             return fail(error, "Duplicate event state key.");
@@ -224,7 +236,7 @@ bool StateStore::save(const std::filesystem::path &path, std::string *error) con
     std::ostringstream text;
     text.imbue(std::locale::classic());
     text << std::setprecision(std::numeric_limits<float>::max_digits10);
-    text << "OverworldEventsState 1\nRecords " << ordered.size() << '\n';
+    text << "OverworldEventsState 2\nRecords " << ordered.size() << '\n';
     for (const auto *record : ordered)
         writeRecord(text, *record);
     text << "End\n";

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "QuestIcons.h"
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ class Game;
 namespace encounters::mapmarkers {
 struct Marker {
     int32_t x, y, z; // Blocks.
+    questicons::Icon icon = questicons::Icon::Event;
 };
 // Installs the hook after checking the exact native instructions. On failure
 // the caller keeps its fallback (the actor's own map visibility).

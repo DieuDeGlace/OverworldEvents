@@ -42,6 +42,11 @@ struct EventRecord {
     uint64_t emptySince = 0;
     bool planned = false;
     bool failed = false;
+    // Accepted village objectives survive world reloads, including plans whose
+    // terrain has not loaded yet. Native actor IDs are always session-local.
+    bool townQuest = false, awaitingSite = false;
+    Site town{};
+    unsigned difficultyLevel = 1;
 };
 
 class StateStore {

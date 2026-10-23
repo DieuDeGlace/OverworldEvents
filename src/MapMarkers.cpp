@@ -160,6 +160,16 @@ void draw(unsigned char *frame, unsigned char *map) {
     if (markers.empty() || !game)
         return diagnose(0, 0, 0);
     auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
+    if (holder && questicons::ready()) {
+        std::vector<questicons::Point> points;
+        for (const auto &marker : markers) {
+            float screen[3], scale;
+            if (project(map, holder, read<int>(frame + ZoomFrame), marker, screen, scale))
+                points.push_back({screen[0], screen[1], scale * .6f, marker.icon});
+        }
+        questicons::map(points);
+        return diagnose(points.empty() ? 6 : 4, 0, points.size());
+    }
     void *marker = holder ? slot(holder, spriteOffset) : nullptr;
     if (!marker)
         return diagnose(1, 0, 0);

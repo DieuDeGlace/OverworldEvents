@@ -24,4 +24,13 @@ inline Site candidate(Site origin, int radius, unsigned attempt) {
     distance = std::max<int64_t>(256, distance) + 128 * (attempt / 8);
     return {origin.x + offset.x * distance, origin.y + offset.y * distance};
 }
+inline Site nearby(Site target, unsigned attempt) {
+    if (!attempt)
+        return target;
+    constexpr Site directions[] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1},
+                                   {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
+    auto direction = directions[(attempt - 1) % 8];
+    int distance = 16 * (1 + (attempt - 1) / 8);
+    return {target.x + direction.x * distance, target.y + direction.y * distance};
+}
 } // namespace encounters::town
