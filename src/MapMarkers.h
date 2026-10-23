@@ -8,10 +8,8 @@ namespace cube {
 class Game;
 }
 
-// Native world-map objective icons. The map routine collects every icon it
-// draws into one list; a hook just before that list is sorted and drawn adds
-// one icon per active event, using the native mission-tag sprite. Icons tilt,
-// scale and sort with the map like native ones; nothing persistent is changed.
+// Positions are projected by the native map camera. Full-map sprites use the
+// supplied quest atlas; native icons remain the minimap/unsupported-GPU fallback.
 namespace encounters::mapmarkers {
 struct Marker {
     int32_t x, y, z; // Blocks.

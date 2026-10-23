@@ -15,6 +15,7 @@ int main() {
     quest.planned = quest.townQuest = quest.awaitingSite = true;
     quest.site = {-14000, 26000};
     quest.town = {-14500, 26000};
+    const auto origin = quest.site;
     quest.difficultyLevel = 80;
     // No enemy races or loaded terrain yet: the destination is still a valid,
     // persisted quest, so talking does not depend on outside-town chunks.
@@ -64,7 +65,6 @@ int main() {
     assert(!state.get(42, {-2, 3}, 1).townQuest);
     assert(state.get(42, {-2, 3}, 1).difficultyLevel == 1);
     std::filesystem::remove(file);
-    auto origin = quest.site;
     for (unsigned i = 0; i < 33; ++i)
         assert(within(town::nearby(origin, i), origin, 91));
     float hp = 1, damage = 1;

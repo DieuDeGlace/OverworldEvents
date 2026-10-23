@@ -58,6 +58,7 @@ struct Renderer {
     ComPtr<ID3D11RasterizerState> raster;
 
     bool initialize(ID3D11Device *next) {
+        device = next; // Remember a failed device; retry only after device recreation.
         ComPtr<ID3D11Device1> device1;
         ComPtr<ID3D11DeviceContext> immediate;
         if (FAILED(next->QueryInterface(IID_PPV_ARGS(&device1))))
@@ -231,6 +232,8 @@ void present(IDXGISwapChain *swapChain, bool mapOpen, bool playing) {
             return;
         available.store(true, std::memory_order_release);
     }
+    if (!available.load(std::memory_order_acquire))
+        return;
     std::vector<Point> points;
     {
         std::unique_lock<std::mutex> lock(gate, std::try_to_lock);

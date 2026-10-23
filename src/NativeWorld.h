@@ -1,9 +1,11 @@
 #pragma once
 #include "cwsdk.h"
 #include "EventRules.h"
+#include "TownRules.h"
 #include <cmath>
 #include <climits>
 #include <cstring>
+#include <limits>
 
 namespace encounters::native {
 inline uintptr_t base() {
@@ -46,6 +48,21 @@ inline Location location(cube::World *world, Site point) {
         reinterpret_cast<void (*)(cube::World *, int, int, Location *)>(base() + 0x35ce0)(
             world, int(point.x), int(point.y), &value);
     return value;
+}
+// Procedural ground query used by the native map and TerrainVariance. It
+// neither loads nor mutates zones, so village offers need no loaded chunks.
+inline float predictedHeight(cube::World *world, Site point) {
+    if (!world || !coordinate(point))
+        return std::numeric_limits<float>::quiet_NaN();
+    return reinterpret_cast<float (*)(cube::World *, int, int, int)>(base() + 0x35ea0)(
+        world, int(point.x), int(point.y), 0);
+}
+inline std::array<float, 5> predictedFootprint(cube::World *world, Site point) {
+    std::array<float, 5> heights;
+    for (size_t i = 0; i < heights.size(); ++i)
+        heights[i] = predictedHeight(world,
+            {point.x + town::HeightSamples[i].x, point.y + town::HeightSamples[i].y});
+    return heights;
 }
 inline Site position(cube::Creature *creature) {
     return {floorDivide(creature->entity_data.position.x, 65536),

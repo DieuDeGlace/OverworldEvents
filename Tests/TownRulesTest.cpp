@@ -26,6 +26,11 @@ int main() {
            seen[unsigned(Kind::Ambush)]);
     assert(!seen[unsigned(Kind::ChestSack)] && !seen[unsigned(Kind::ChestBoss)] &&
            !seen[unsigned(Kind::Bounty)]);
+    assert(town::dryLand({8, 10, 9, 11, 8}));
+    assert(!town::dryLand({-83, -84, -82, -83, -85})); // Island-village ocean target.
+    assert(!town::dryLand({8, 9, -1, 10, 8})); // One wet part of the footprint.
+    assert(!town::dryLand({30, 50, 31, 32, 33})); // Excessive slope.
+    assert(!town::dryLand({8, 9, 10, 11, std::numeric_limits<float>::quiet_NaN()}));
     Site origin{-1000, 4000};
     auto outside = town::candidate(origin, 500, 0);
     assert(outside.x - origin.x == 628 && outside.y == origin.y);

@@ -160,7 +160,7 @@ void draw(unsigned char *frame, unsigned char *map) {
     if (markers.empty() || !game)
         return diagnose(0, 0, 0);
     auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
-    if (holder && questicons::ready()) {
+    if (holder && game->gui.map_open && questicons::ready()) {
         std::vector<questicons::Point> points;
         for (const auto &marker : markers) {
             float screen[3], scale;

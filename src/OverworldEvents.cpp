@@ -83,6 +83,13 @@ struct Data {
         std::atomic<unsigned> level{1};
     };
     std::array<EnemyDifficulty, 64> enemyDifficulty{};
+    struct TownSite {
+        Site site{};
+        bool found = false;
+        uint64_t until = 0;
+    };
+    // Villagers in one town share the procedural search, including failures.
+    std::unordered_map<uint64_t, TownSite> townSites;
     Bridge bridge;
     Assets assets;
     cube::World *session = nullptr;
@@ -281,6 +288,7 @@ static float fraction(cube::Creature *creature) {
 // Remove an actor on every world copy. Inanimate, opened and at zero HP it can
 // no longer be talked to, looted, targeted or shown on the map.
 static void despawn(cube::Game *game, uint64_t id) {
+    forgetEnemy(data(), id);
     for (auto world : {&game->host.world, game->world}) {
         if (!world)
             continue;
@@ -386,6 +394,39 @@ static bool available(const Assets &assets, Kind kind) {
     if (chestEvent(kind) && (!assets.keyCategory || !assets.keyId || *assets.keyCategory != 22))
         return false;
     return kind != Kind::ChestSack || bool(assets.sackRace);
+}
+static bool selectTownSite(Data &value, cube::Game *game, EventRecord &candidate,
+                           const native::Location &village) {
+    auto key = uint64_t(uint32_t(village.x)) << 32 | uint32_t(village.y);
+    if (value.townSites.size() > 128)
+        value.townSites.clear();
+    auto &cached = value.townSites[key];
+    auto now = GetTickCount64();
+    auto available = [&](Site site) {
+        return relocating(site, candidate.previousSite, candidate.cycle) &&
+               siteAvailable(value.state, {candidate.world, candidate.region, candidate.slot},
+                             site, utc());
+    };
+    if (now < cached.until) {
+        if (!cached.found)
+            return false;
+        if (available(cached.site)) {
+            candidate.site = cached.site;
+            return true;
+        }
+    }
+    cached = {{}, false, now + 5000};
+    for (unsigned attempt = 0; attempt < 64; ++attempt) {
+        auto site = town::candidate({village.x, village.y}, village.radius, attempt);
+        if (native::coordinate(site) && available(site) &&
+            native::overworld(game->world, site, candidate.region) &&
+            town::dryLand(native::predictedFootprint(game->world, site))) {
+            candidate.site = cached.site = site;
+            cached.found = true;
+            return true;
+        }
+    }
+    return false;
 }
 static bool footprint(cube::World *world, Site site, int &height, int radius, bool flat) {
     if (!native::ground(world, site, height, 8))
@@ -589,18 +630,26 @@ static void objectiveMarker(cube::Game *game, const EventRecord &saved, Active &
         active.markerKnown = true;
     }
 }
-// Hands the unfinished events' objective positions to the map hook.
+static mapmarkers::Marker siteMarker(cube::Game *game, Site site, questicons::Icon icon) {
+    auto height = native::predictedHeight(game->world, site);
+    int z = std::isfinite(height) && std::abs(height) < 100000 ? int(std::floor(height)) : 0;
+    return {int32_t(site.x), int32_t(site.y), z, icon};
+}
+// Hands unfinished destinations to the map hook, including accepted objectives
+// whose actors have not loaded yet. Completion moves the grey pin back to town.
 static void publishMarkers(const Data &value, cube::Game *game) {
     if (!mapmarkers::active())
         return;
     std::vector<mapmarkers::Marker> markers;
     for (const auto &active : value.active) {
-        const auto *saved =
-            value.state.find(active.key.world, active.key.region, active.key.slot);
-        if (active.markerKnown && saved && !saved->rewardClaimed && !saved->failed)
-            markers.push_back({active.marker.x, active.marker.y, active.marker.z,
-                               saved->townQuest ? questicons::Icon::Destination
-                                                : questicons::Icon::Event});
+        const auto *saved = value.state.find(active.key.world, active.key.region, active.key.slot);
+        if (!active.markerKnown || !saved || saved->rewardClaimed || saved->failed)
+            continue;
+        auto marker = active.marker;
+        marker.icon = saved->townQuest ? questicons::Icon::Destination : questicons::Icon::Event;
+        if (saved->townQuest && saved->objectiveDone)
+            marker = siteMarker(game, saved->town, questicons::Icon::Destination);
+        markers.push_back(marker);
     }
     for (const auto &entry : value.state.entries()) {
         const auto &saved = entry.second;
@@ -610,8 +659,8 @@ static void publishMarkers(const Data &value, cube::Game *game) {
         for (const auto &instance : value.active)
             active |= instance.key == entry.first;
         if (!active)
-            markers.push_back({int32_t(saved.site.x), int32_t(saved.site.y), 0,
-                               questicons::Icon::Destination});
+            markers.push_back(siteMarker(game, saved.objectiveDone ? saved.town : saved.site,
+                                          questicons::Icon::Destination));
     }
     mapmarkers::publish(game, markers);
 }
@@ -1078,6 +1127,7 @@ static void tick(cube::Game *game) {
         value.session = nullptr;
         value.game = nullptr;
         value.hints.clear();
+        value.townSites.clear();
         mapmarkers::publish(nullptr, {});
         value.active.clear();
         value.spawned.clear();
@@ -1108,6 +1158,8 @@ static void tick(cube::Game *game) {
         value.session = &game->host.world;
         value.world = identity;
         value.assets = {};
+        value.hints.clear();
+        value.townSites.clear();
         value.assetLog = false;
         travel::clearCache();
     }
@@ -1164,13 +1216,26 @@ static void tick(cube::Game *game) {
             bool exists = false;
             for (const auto &active : value.active)
                 exists |= active.key == referral.objective;
-            if (exists || saved.cycle != referral.cycle || saved.failed || saved.rewardClaimed ||
-                !within(player, saved.site, 192))
+            if (exists || saved.cycle != referral.cycle || saved.failed || saved.rewardClaimed)
+                continue;
+            if (saved.awaitingSite &&
+                !town::dryLand(native::predictedFootprint(game->world, saved.site))) {
+                auto village = native::location(game->world, saved.town);
+                if (!selectTownSite(value, game, saved, village))
+                    continue;
+                saved.attempt = 0;
+                value.dirty = true;
+            }
+            if (!within(player, saved.site, 192))
                 continue;
             auto candidate = saved;
             auto target = saved.site;
             std::array<LongVector3, ActorCount> points{};
-            for (unsigned attempt = 0; attempt < (saved.awaitingSite ? 33u : 1u); ++attempt) {
+            // Four checks per quest/tick keep terrain work bounded on mobile.
+            // Continue around the same small objective area on the next tick.
+            for (unsigned search = 0; search < (saved.awaitingSite ? 4u : 1u); ++search) {
+                unsigned attempt = saved.awaitingSite ? saved.attempt % 33 : 0;
+                saved.attempt = (saved.attempt + 1) % 33;
                 candidate.site = town::nearby(target, attempt);
                 if (!siteAvailable(value.state, referral.objective, candidate.site, now) ||
                     !place(game, candidate, points))
@@ -1277,6 +1342,7 @@ static void death(cube::Game *game, cube::Creature *creature) {
         return;
     auto &value = data();
     std::lock_guard<std::recursive_mutex> guard(value.gate);
+    forgetEnemy(value, uint64_t(creature->id));
     for (auto &active : value.active) {
         auto &saved = record(value, active.key);
         if (saved.failed || saved.rewardClaimed)
@@ -1380,21 +1446,14 @@ static bool townOffer(Data &value, cube::Game *game, const native::Location &vil
     if (!available(value.assets, candidate.kind))
         candidate.kind = Kind::Ambush;
     candidate.enemyCount = enemyCount(candidate.kind, roll);
-    for (unsigned attempt = 0; attempt < 64; ++attempt) {
-        candidate.site = town::candidate(center, village.radius, attempt);
-        if (native::coordinate(candidate.site) &&
-            relocating(candidate.site, candidate.previousSite, candidate.cycle) &&
-            native::overworld(game->world, candidate.site, region) &&
-            siteAvailable(value.state, {candidate.world, region, candidate.slot},
-                          candidate.site, utc())) {
-            candidate.planned = candidate.townQuest = candidate.awaitingSite = true;
-            candidate.town = center;
-            candidate.difficultyLevel = unsigned(std::clamp(
-                int(game->world->local_creature->entity_data.level), 1, 10000000));
-            return true;
-        }
-    }
-    return false;
+    if (!selectTownSite(value, game, candidate, village))
+        return false;
+    candidate.attempt = 0;
+    candidate.planned = candidate.townQuest = candidate.awaitingSite = true;
+    candidate.town = center;
+    candidate.difficultyLevel = unsigned(std::clamp(
+        int(game->world->local_creature->entity_data.level), 1, 10000000));
+    return true;
 }
 static int townInteraction(Data &value, cube::Game *game, cube::Creature *creature) {
     if (!value.enabled || !game->host.running || value.session != &game->host.world ||
