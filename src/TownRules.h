@@ -4,6 +4,11 @@
 #include <array>
 
 namespace encounters::town {
+// Public marker values also serve older nameplate adapters (1/2).
+enum QuestMarker { NoQuest = 0, Offer = 1, HandIn = 2, InProgress = 3 };
+inline int referralMarker(bool complete, bool claimed, bool failed) {
+    return claimed || failed ? NoQuest : complete ? HandIn : InProgress;
+}
 // Ordinary talking villagers only: merchants/pets and named quest bosses keep
 // their native interactions. Humanoid race membership is checked at runtime.
 inline bool eligible(int behaviour, float hp, unsigned flags) {
@@ -28,7 +33,7 @@ inline Site candidate(Site origin, int radius, unsigned attempt) {
 inline Site nearby(Site target, unsigned attempt) {
     if (!attempt)
         return target;
-    constexpr Site directions[] = {{1, 0}, {1, 1}, {0, 1}, {-1, 1},
+    constexpr Site directions[] = {{1, 0},  {1, 1},   {0, 1},  {-1, 1},
                                    {-1, 0}, {-1, -1}, {0, -1}, {1, -1}};
     auto direction = directions[(attempt - 1) % 8];
     int distance = 16 * (1 + (attempt - 1) / 8);

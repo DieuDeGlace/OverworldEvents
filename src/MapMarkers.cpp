@@ -43,12 +43,12 @@ constexpr ptrdiff_t VectorBegin = -0x48, VectorEnd = -0x40;
 // fills it at the same offsets. The SDK's cube::Game::gui does not line up with
 // it, so sprites are always taken from here.
 constexpr size_t MapHolder = 0x1a8;
-constexpr size_t MapScreen = 0x8;    // map object -> screen with width/height
+constexpr size_t MapScreen = 0x8; // map object -> screen with width/height
 constexpr size_t ScreenWidth = 0x1c4, ScreenHeight = 0x1c8;
 constexpr size_t MapCenter = 0x1e20; // holder: int64 x, y, z in dots
 constexpr size_t MapFocus = 0x1e50;  // holder: float
 constexpr size_t Matrices = 0x10, ViewMatrix = 0x58, ProjectionMatrix = 0x18;
-constexpr ptrdiff_t ZoomFrame = -0x78; // int, the map routine's zoom (r12 in the loop)
+constexpr ptrdiff_t ZoomFrame = -0x78;      // int, the map routine's zoom (r12 in the loop)
 constexpr uintptr_t TransformRva = 0x2b680; // (matrix, out vec3, in vec3) -> out
 
 // GUI sprite slots the map draws icons with (verified against the native
@@ -96,13 +96,17 @@ void diagnose(int state, size_t icons, size_t added) {
     static std::atomic<int> last{-1};
     if (last.exchange(state) == state)
         return;
-    static const char *text[] = {"no markers to draw", "marker sprite missing",
-                                 "icon list rejected", "no native template icon in list",
-                                 "markers added", "map sprite table mismatch",
-                                 "markers outside the visible map"};
+    static const char *text[] = {"no markers to draw",
+                                 "marker sprite missing",
+                                 "icon list rejected",
+                                 "no native template icon in list",
+                                 "markers added",
+                                 "map sprite table mismatch",
+                                 "markers outside the visible map",
+                                 "quest sprites queued"};
     char message[192];
     snprintf(message, sizeof(message), "Map icons: %s (native icons=%zu, added=%zu, sprite=%s).",
-             text[state], icons, added, spriteName);
+             text[state], icons, added, state == 7 ? "quest-atlas" : spriteName);
     FILE *file = nullptr;
     fopen_s(&file, "Mods/OverworldEvents.log", "a");
     if (file) {
@@ -117,14 +121,14 @@ template <class T> T read(const unsigned char *at) {
 }
 // Screen position, depth and scale of a world point, exactly as the native map
 // computes them for its own icons. False when the point is not visible.
-bool project(const unsigned char *map, const unsigned char *holder, int zoom,
-             const Marker &marker, float screen[3], float &scale) {
+bool project(const unsigned char *map, const unsigned char *holder, int zoom, const Marker &marker,
+             float screen[3], float &scale) {
     auto view = read<const unsigned char *>(map + MapScreen);
     auto matrices = read<unsigned char *>(holder + Matrices);
     if (!view || !matrices || zoom <= 0 || zoom > (1 << 20))
         return false;
-    const int64_t world[3] = {int64_t(marker.x) * 65536 + 32768,
-                              int64_t(marker.y) * 65536 + 32768, int64_t(marker.z) * 65536};
+    const int64_t world[3] = {int64_t(marker.x) * 65536 + 32768, int64_t(marker.y) * 65536 + 32768,
+                              int64_t(marker.z) * 65536};
     auto factor = int64_t(1.0 / zoom * 65536.0);
     float relative[3];
     for (int i = 0; i < 3; ++i) {
@@ -160,7 +164,7 @@ void draw(unsigned char *frame, unsigned char *map) {
     if (markers.empty() || !game)
         return diagnose(0, 0, 0);
     auto holder = map ? read<unsigned char *>(map + MapHolder) : nullptr;
-    if (holder && game->gui.map_open && questicons::ready()) {
+    if (holder && questicons::ready()) {
         std::vector<questicons::Point> points;
         for (const auto &marker : markers) {
             float screen[3], scale;
@@ -168,7 +172,7 @@ void draw(unsigned char *frame, unsigned char *map) {
                 points.push_back({screen[0], screen[1], scale * .6f, marker.icon});
         }
         questicons::map(points);
-        return diagnose(points.empty() ? 6 : 4, 0, points.size());
+        return diagnose(points.empty() ? 6 : 7, 0, points.size());
     }
     void *marker = holder ? slot(holder, spriteOffset) : nullptr;
     if (!marker)
@@ -240,13 +244,13 @@ bool buildStub(unsigned char *out, size_t &size) {
     bytes({0x4c, 0x89, 0xea}); // mov rdx, r13 (the map object, kept by the routine)
     bytes({0x48, 0xb8});       // mov rax, draw
     imm64(uint64_t(&draw));
-    bytes({0xff, 0xd0}); // call rax
+    bytes({0xff, 0xd0});        // call rax
     for (int i = 0; i < 6; ++i) // movdqu xmm0..xmm5, [rsp+0x20+16i]
         bytes({0xf3, 0x0f, 0x6f, save[i], 0x24, (unsigned char)(0x20 + 16 * i)});
     bytes({0x48, 0x8b, 0xa4, 0x24, 0x80, 0x00, 0x00, 0x00}); // mov rsp, [rsp+0x80]
     bytes({0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5a, 0x59, 0x58}); // pop r11..rax
-    code.insert(code.end(), Original, Original + sizeof(Original)); // Displaced code.
-    bytes({0xff, 0x25, 0, 0, 0, 0});                                // jmp [rip]
+    code.insert(code.end(), Original, Original + sizeof(Original));            // Displaced code.
+    bytes({0xff, 0x25, 0, 0, 0, 0});                                           // jmp [rip]
     imm64(uint64_t(native::base() + ResumeRva));
     if (code.size() > size)
         return false;

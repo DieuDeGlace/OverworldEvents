@@ -1715,8 +1715,7 @@ static int chat(std::wstring *message) {
     }
     return 0;
 }
-// Nameplate hint for a villager: 1 when its town can offer an event now,
-// 2 when the event taken from its town is done and ready to hand in, else 0.
+// Village quest status: offer (1), hand-in (2), in progress (3), or none (0).
 // Called while nameplates are drawn: never waits for the event lock.
 static int questMarker(cube::Creature *creature) {
     auto &value = data();
@@ -1746,9 +1745,9 @@ static int questMarker(cube::Creature *creature) {
             const auto *saved = value.state.find(referral.objective.world,
                                                  referral.objective.region,
                                                  referral.objective.slot);
-            if (saved && saved->cycle == referral.cycle && saved->objectiveDone &&
-                !saved->rewardClaimed && !saved->failed)
-                marker = 2;
+            if (saved && saved->cycle == referral.cycle)
+                marker = town::referralMarker(saved->objectiveDone, saved->rewardClaimed,
+                                              saved->failed);
         }
         if (!referred) {
             auto region = native::region(value.game->world, origin);
@@ -1833,7 +1832,8 @@ EXPORT void OverworldEventNameplate(cube::Creature *creature, float x, float y) 
     if (marker)
         encounters::questicons::nameplate(uint64_t(creature->id), x, y,
             marker == 1 ? encounters::questicons::Icon::Offer
-                        : encounters::questicons::Icon::Event);
+            : marker == 2 ? encounters::questicons::Icon::Event
+                          : encounters::questicons::Icon::Destination);
 }
 EXPORT int IsOverworldEventEntity(uint64_t id) {
     auto &value = eventmod::data();

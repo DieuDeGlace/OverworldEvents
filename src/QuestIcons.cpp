@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -17,16 +18,53 @@ namespace encounters::questicons {
 namespace {
 using Microsoft::WRL::ComPtr;
 constexpr size_t MaxIcons = 256;
-struct TimedPoint { Point point; ULONGLONG until; };
+struct TimedPoint {
+    Point point;
+    ULONGLONG until;
+};
 std::mutex gate;
 std::unordered_map<uint64_t, TimedPoint> heads;
 std::vector<Point> mapPoints;
 std::atomic<bool> available{false};
+void log(const char *message) {
+    FILE *file = nullptr;
+    fopen_s(&file, "Mods/OverworldEvents.log", "a");
+    if (file) {
+        fprintf(file, "Quest atlas: %s\n", message);
+        fclose(file);
+    }
+}
+
+std::vector<Point> takeFrame(bool mapOpen, bool playing, ULONGLONG now) {
+    std::unique_lock<std::mutex> lock(gate, std::try_to_lock);
+    if (!lock.owns_lock())
+        return {};
+    std::vector<Point> points;
+    // The native projection already places small-map icons in screen pixels.
+    // Closing the full map must not discard those objective markers.
+    if (playing)
+        points.swap(mapPoints);
+    mapPoints.clear();
+    for (auto it = heads.begin(); it != heads.end();) {
+        if (!playing || now >= it->second.until)
+            it = heads.erase(it);
+        else {
+            if (!mapOpen && points.size() < MaxIcons)
+                points.push_back(it->second.point);
+            ++it;
+        }
+    }
+    return points;
+}
 
 // Exact crop bounds in the supplied 320x80 PNG, including the white outlines.
-struct Crop { float x, y, width, height; };
+struct Crop {
+    float x, y, width, height;
+};
 constexpr Crop Crops[] = {{16, 16, 48, 52}, {96, 16, 48, 52}, {188, 16, 24, 48}};
-struct Vertex { float x, y, u, v; };
+struct Vertex {
+    float x, y, u, v;
+};
 constexpr char Shader[] = R"(
 Texture2D atlas : register(t0);
 SamplerState nearestPixel : register(s0);
@@ -68,24 +106,24 @@ struct Renderer {
             return false;
         D3D_FEATURE_LEVEL level = next->GetFeatureLevel(), selected;
         if (FAILED(device1->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION,
-                __uuidof(ID3D11Device), &selected, &state)))
+                                                     __uuidof(ID3D11Device), &selected, &state)))
             return false;
         ComPtr<ID3DBlob> vertexCode, pixelCode;
-        if (FAILED(D3DCompile(Shader, sizeof(Shader) - 1, nullptr, nullptr, nullptr, "vs",
-                "vs_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, nullptr)) ||
-            FAILED(D3DCompile(Shader, sizeof(Shader) - 1, nullptr, nullptr, nullptr, "ps",
-                "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, nullptr)))
+        if (FAILED(D3DCompile(Shader, sizeof(Shader) - 1, nullptr, nullptr, nullptr, "vs", "vs_4_0",
+                              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vertexCode, nullptr)) ||
+            FAILED(D3DCompile(Shader, sizeof(Shader) - 1, nullptr, nullptr, nullptr, "ps", "ps_4_0",
+                              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &pixelCode, nullptr)))
             return false;
         if (FAILED(next->CreateVertexShader(vertexCode->GetBufferPointer(),
-                vertexCode->GetBufferSize(), nullptr, &vs)) ||
+                                            vertexCode->GetBufferSize(), nullptr, &vs)) ||
             FAILED(next->CreatePixelShader(pixelCode->GetBufferPointer(),
-                pixelCode->GetBufferSize(), nullptr, &ps)))
+                                           pixelCode->GetBufferSize(), nullptr, &ps)))
             return false;
         const D3D11_INPUT_ELEMENT_DESC elements[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0}};
         if (FAILED(next->CreateInputLayout(elements, 2, vertexCode->GetBufferPointer(),
-                vertexCode->GetBufferSize(), &layout)))
+                                           vertexCode->GetBufferSize(), &layout)))
             return false;
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = UINT(MaxIcons * 6 * sizeof(Vertex));
@@ -98,11 +136,13 @@ struct Renderer {
         pixels.reserve(atlas::Width * atlas::Height);
         for (const auto &run : atlas::Pixels)
             pixels.insert(pixels.end(), run.count,
-                          uint32_t(run.r) | uint32_t(run.g) << 8 | uint32_t(run.b) << 16 | 0xff000000u);
+                          uint32_t(run.r) | uint32_t(run.g) << 8 | uint32_t(run.b) << 16 |
+                              0xff000000u);
         if (pixels.size() != atlas::Width * atlas::Height)
             return false;
         D3D11_TEXTURE2D_DESC texture{};
-        texture.Width = atlas::Width; texture.Height = atlas::Height;
+        texture.Width = atlas::Width;
+        texture.Height = atlas::Height;
         texture.MipLevels = texture.ArraySize = 1;
         texture.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         texture.SampleDesc.Count = 1;
@@ -155,8 +195,8 @@ struct Renderer {
             auto crop = Crops[unsigned(point.icon)];
             float scale = std::clamp(point.scale, .25f, 2.f);
             float width = crop.width * scale, height = crop.height * scale;
-            if (point.x < -width || point.x > size.Width + width ||
-                point.y < 0 || point.y > size.Height + height)
+            if (point.x < -width || point.x > size.Width + width || point.y < 0 ||
+                point.y > size.Height + height)
                 continue;
             // Coordinates anchor the bottom-center at the map location/head.
             float x0 = (point.x - width * .5f) * 2 / size.Width - 1;
@@ -165,8 +205,8 @@ struct Renderer {
             float y1 = 1 - point.y * 2 / size.Height;
             float u0 = crop.x / atlas::Width, u1 = (crop.x + crop.width) / atlas::Width;
             float v0 = crop.y / atlas::Height, v1 = (crop.y + crop.height) / atlas::Height;
-            const Vertex quad[] = {{x0,y0,u0,v0}, {x1,y0,u1,v0}, {x0,y1,u0,v1},
-                                   {x0,y1,u0,v1}, {x1,y0,u1,v0}, {x1,y1,u1,v1}};
+            const Vertex quad[] = {{x0, y0, u0, v0}, {x1, y0, u1, v0}, {x0, y1, u0, v1},
+                                   {x0, y1, u0, v1}, {x1, y0, u1, v0}, {x1, y1, u1, v1}};
             batch.insert(batch.end(), std::begin(quad), std::end(quad));
         }
         if (batch.empty())
@@ -187,11 +227,13 @@ struct Renderer {
         context->RSSetViewports(1, &viewport);
         context->IASetInputLayout(layout.Get());
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        auto vb = vertices.Get(); UINT stride = sizeof(Vertex), offset = 0;
+        auto vb = vertices.Get();
+        UINT stride = sizeof(Vertex), offset = 0;
         context->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
         context->VSSetShader(vs.Get(), nullptr, 0);
         context->PSSetShader(ps.Get(), nullptr, 0);
-        auto texture = atlasView.Get(); auto nearest = sampler.Get();
+        auto texture = atlasView.Get();
+        auto nearest = sampler.Get();
         context->PSSetShaderResources(0, 1, &texture);
         context->PSSetSamplers(0, 1, &nearest);
         context->Draw(UINT(batch.size()), 0);
@@ -211,14 +253,23 @@ void nameplate(uint64_t id, float x, float y, Icon icon) {
         return;
     if (heads.size() >= MaxIcons && !heads.count(id))
         return;
-    heads[id] = {{x, y - 22.f, .5f, icon}, GetTickCount64() + 150};
+    // Native anchor includes the health bar and two lines of name/level text.
+    // Keep the sprite above that stack instead of covering its labels.
+    heads[id] = {{x, y - 54.f, .5f, icon}, GetTickCount64() + 150};
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        log("native nameplate received.");
+    }
 }
 void map(const std::vector<Point> &points) {
     std::unique_lock<std::mutex> lock(gate, std::try_to_lock);
     if (lock.owns_lock())
         mapPoints.assign(points.begin(), points.begin() + std::min(points.size(), MaxIcons));
 }
-bool ready() { return available.load(std::memory_order_acquire); }
+bool ready() {
+    return available.load(std::memory_order_acquire);
+}
 void present(IDXGISwapChain *swapChain, bool mapOpen, bool playing) {
     if (!swapChain)
         return;
@@ -228,33 +279,24 @@ void present(IDXGISwapChain *swapChain, bool mapOpen, bool playing) {
     if (renderer.device.Get() != device.Get()) {
         available.store(false, std::memory_order_release);
         renderer = {};
-        if (!renderer.initialize(device.Get()))
+        if (!renderer.initialize(device.Get())) {
+            log("D3D11 initialization failed; native map fallback retained.");
             return;
+        }
         available.store(true, std::memory_order_release);
+        log("D3D11 renderer ready.");
     }
     if (!available.load(std::memory_order_acquire))
         return;
-    std::vector<Point> points;
-    {
-        std::unique_lock<std::mutex> lock(gate, std::try_to_lock);
-        if (!lock.owns_lock())
-            return;
-        auto now = GetTickCount64();
-        for (auto it = heads.begin(); it != heads.end();) {
-            if (!playing || now >= it->second.until)
-                it = heads.erase(it);
-            else {
-                if (!mapOpen)
-                    points.push_back(it->second.point);
-                ++it;
-            }
-        }
-        if (playing && mapOpen)
-            points.swap(mapPoints);
-        mapPoints.clear(); // Captured anew for every native map frame.
-    }
+    auto points = takeFrame(mapOpen, playing, GetTickCount64());
     ComPtr<ID3D11Texture2D> target;
     if (!points.empty() && SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(&target))))
-        renderer.draw(target.Get(), points);
+        if (!renderer.draw(target.Get(), points)) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                log("sprite batch failed.");
+            }
+        }
 }
 } // namespace encounters::questicons

@@ -6,6 +6,10 @@
 
 int main() {
     using namespace encounters;
+    assert(town::referralMarker(false, false, false) == town::InProgress);
+    assert(town::referralMarker(true, false, false) == town::HandIn);
+    assert(town::referralMarker(true, true, false) == town::NoQuest);
+    assert(town::referralMarker(false, false, true) == town::NoQuest);
     assert(town::eligible(3, 100.f, 1u << 15));
     for (int behaviour = 0; behaviour <= 8; ++behaviour)
         assert(town::eligible(behaviour, 100.f, 0) == (behaviour == 3));
@@ -28,8 +32,8 @@ int main() {
            !seen[unsigned(Kind::Bounty)]);
     assert(town::dryLand({8, 10, 9, 11, 8}));
     assert(!town::dryLand({-83, -84, -82, -83, -85})); // Island-village ocean target.
-    assert(!town::dryLand({8, 9, -1, 10, 8})); // One wet part of the footprint.
-    assert(!town::dryLand({30, 50, 31, 32, 33})); // Excessive slope.
+    assert(!town::dryLand({8, 9, -1, 10, 8}));         // One wet part of the footprint.
+    assert(!town::dryLand({30, 50, 31, 32, 33}));      // Excessive slope.
     assert(!town::dryLand({8, 9, 10, 11, std::numeric_limits<float>::quiet_NaN()}));
     Site origin{-1000, 4000};
     auto outside = town::candidate(origin, 500, 0);
