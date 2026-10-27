@@ -30,5 +30,14 @@ int main() {
     assert(assets.keyId == 9); // Reject ambiguous RustyKey, use an exact safe variant.
     speech.entity_type_id_map.emplace(195, L"Cage1");
     assert(!resolveAssets(speech).cageRace);
+    speech.entity_type_id_map.emplace(107, L"SeaCrab");
+    speech.entity_type_id_map.emplace(153, L"MawFish");
+    speech.entity_type_id_map.emplace(154, L"Piranha");
+    speech.entity_type_id_map.emplace(106, L"Crab");
+    speech.entity_type_id_map.emplace(69, L"PlantCreature");
+    assets = resolveAssets(speech);
+    assert(aquaticRace(assets, 107) && aquaticRace(assets, 153) && aquaticRace(assets, 154));
+    assert(!aquaticRace(assets, 106) && !aquaticRace(assets, 69));
+    assert(!aquaticRace(assets, 70) && !aquaticRace(Assets{}, 153));
     puts("Native category-22 keys, exact identifiers and unavailable/ambiguous assets: PASS");
 }

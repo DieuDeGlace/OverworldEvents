@@ -60,8 +60,8 @@ inline float predictedHeight(cube::World *world, Site point) {
 inline std::array<float, 5> predictedFootprint(cube::World *world, Site point) {
     std::array<float, 5> heights;
     for (size_t i = 0; i < heights.size(); ++i)
-        heights[i] = predictedHeight(world,
-            {point.x + town::HeightSamples[i].x, point.y + town::HeightSamples[i].y});
+        heights[i] = predictedHeight(
+            world, {point.x + town::HeightSamples[i].x, point.y + town::HeightSamples[i].y});
     return heights;
 }
 inline Site position(cube::Creature *creature) {
@@ -77,15 +77,39 @@ inline cube::Creature *resident(cube::World &world, uint64_t id) {
 inline float maximumHP(cube::Creature *creature) {
     return reinterpret_cast<float (*)(cube::Creature *)>(base() + 0x5fac0)(creature);
 }
+inline void setHome(cube::Creature *creature, const LongVector3 &position) {
+    constexpr size_t HomePosition = 0x1b8;
+    static_assert(HomePosition >= offsetof(cube::Creature, entity_data));
+    static_assert(HomePosition + sizeof(LongVector3) <= offsetof(cube::Creature, buffs));
+    std::memcpy(reinterpret_cast<unsigned char *>(creature) + HomePosition, &position,
+                sizeof(position));
+}
+inline void setStationaryPosition(cube::Creature *creature, const LongVector3 &position) {
+    // World::inspectCreatures smooths remote movement through these fields.
+    // Anchored objects and bound captives must keep both simulation and draw
+    // positions together; otherwise client prediction fights the server pin.
+    constexpr size_t PreviousDrawnPosition = 0xaf8, DrawnPosition = 0xb10, SmoothingTime = 0xb54;
+    auto memory = reinterpret_cast<unsigned char *>(creature);
+    creature->entity_data.position = position;
+    std::memcpy(memory + PreviousDrawnPosition, &position, sizeof(position));
+    std::memcpy(memory + DrawnPosition, &position, sizeof(position));
+    const float noSmoothing = 0.f;
+    std::memcpy(memory + SmoothingTime, &noSmoothing, sizeof(noSmoothing));
+}
 inline void allowRoaming(cube::Creature *creature) {
-    // The appearance factory sets DWORD +0xbcc bit 0x80, selecting a follower
-    // idle path. Without an owner that path waits forever. Native combat runs
-    // separately; clearing this bit restores the ordinary idle/wander path.
-    auto address = reinterpret_cast<unsigned char *>(creature) + 0xbcc;
+    // Steam AIManager::idle (0x10b90) requires BehaviourWander, not merely
+    // the absence of BehaviourFollowOwner. World::spawn also initializes the
+    // home/origin used by its native 32-block leash. The companion appearance
+    // helper used by the bridge does neither for an independent creature.
+    constexpr size_t Behaviours = 0xbcc;
+    constexpr uint32_t Wander = 0x10, FollowOwner = 0x80;
+    auto memory = reinterpret_cast<unsigned char *>(creature);
+    static_assert(Behaviours + sizeof(uint32_t) <= sizeof(cube::Creature));
+    setHome(creature, creature->entity_data.position);
     uint32_t flags;
-    std::memcpy(&flags, address, sizeof(flags));
-    flags &= ~0x80u;
-    std::memcpy(address, &flags, sizeof(flags));
+    std::memcpy(&flags, memory + Behaviours, sizeof(flags));
+    flags = (flags & ~FollowOwner) | Wander;
+    std::memcpy(memory + Behaviours, &flags, sizeof(flags));
 }
 struct ZoneLock {
     cube::World *world;

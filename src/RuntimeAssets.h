@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace encounters {
 struct Assets {
@@ -12,9 +13,14 @@ struct Assets {
     // CubeMegaMod's native chest factory uses race 181 for the ordinary chest.
     int chestRace = 181;
     std::vector<int> npcRaces;
+    std::vector<int> aquaticRaces;
     std::optional<int> keyCategory, keyId;
     std::wstring keyName;
 };
+inline bool aquaticRace(const Assets &assets, unsigned race) {
+    return std::find(assets.aquaticRaces.begin(), assets.aquaticRaces.end(), int(race)) !=
+           assets.aquaticRaces.end();
+}
 
 template <class Speech>
 inline std::optional<int> entityAsset(const Speech &speech, const wchar_t *name) {
@@ -42,6 +48,14 @@ template <class Speech> inline Assets resolveAssets(const Speech &speech) {
     }
     assets.sackRace = entityAsset(speech, L"Sack");
     assets.ogreRace = entityAsset(speech, L"Ogre");
+    // Exact Steam identifiers from the release reference. Water creatures can
+    // briefly occupy air above a dry support column; terrain alone is not a
+    // sufficient test for a land encounter template.
+    for (const wchar_t *name :
+         {L"SeaCrab", L"SapphireFish", L"LemonFish", L"Seahorse", L"Mermaid", L"Merman", L"Shark",
+          L"LanternFish", L"MawFish", L"Piranha", L"Blowfish"})
+        if (auto race = entityAsset(speech, name))
+            assets.aquaticRaces.push_back(*race);
     for (const wchar_t *name : {L"WoodChest", L"Chest"}) {
         auto race = entityAsset(speech, name);
         // CubeMegaMod's verified chest interaction branch only handles 181–184.

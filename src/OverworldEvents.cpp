@@ -31,7 +31,7 @@ cube::Item::Item() {
 
 namespace eventmod {
 using namespace encounters;
-constexpr unsigned Named = 1u << 9, NoTalk = 1u << 13, CanPickup = 1u << 14, Friendly = 1u << 15,
+constexpr unsigned Fish = 1u << 8, Named = 1u << 9, NoTalk = 1u << 13, CanPickup = 1u << 14, Friendly = 1u << 15,
                    Mini = 1u << 17, Boss = 1u << 18, Petrified = 1u << 22;
 // Native EntityBehaviour values; examination objects use objects::ExamineBehaviour.
 constexpr char HostileBehaviour = 1, VillagerBehaviour = 3, InanimateBehaviour = 7;
@@ -328,7 +328,8 @@ static std::vector<cube::Creature *> enemies(cube::Game *game, Region region, co
         // Wraiths use a native home-position teleport route not initialized by
         // the common factory. Exclude that race rather than spawning it at 0,0.
         if (entity.hostility_type != HostileBehaviour || entity.HP <= 0 || entity.race == 276 ||
-            (entity.appearance.flags2 & (Named | Friendly | Mini | Boss)))
+            aquaticRace(value.assets, entity.race) ||
+            (entity.appearance.flags2 & (Named | Friendly | Mini | Boss | Fish)))
             continue;
         auto actual = native::region(game->world, native::position(creature));
         if (!sameRegion(actual, region))
@@ -350,13 +351,18 @@ static std::vector<cube::Creature *> enemies(cube::Game *game, Region region, co
 }
 // Fill an encounter's enemy races/stars from the region's sampled natives.
 static bool chooseEnemies(cube::Game *game, Region region, const Data &value, uint64_t roll,
-                          EventRecord &saved) {
+                          EventRecord &saved, bool repairAquatic = false) {
     if (!saved.enemyCount)
         return true;
     auto pool = enemies(game, region, value);
     if (pool.empty())
         return false;
     for (unsigned index = 0; index < saved.enemyCount; ++index) {
+        // Repair only invalid unfinished roles in an accepted legacy quest.
+        // Keep its land enemies, kills, health fractions and destination.
+        if (repairAquatic && ((saved.defeatedMask & (1u << index)) ||
+                              !aquaticRace(value.assets, saved.enemyRaces[index])))
+            continue;
         auto pick = pool[mix(roll + index) % pool.size()];
         using LevelQuery = int (*)(cube::Creature *);
         static auto query = [] {
@@ -364,12 +370,14 @@ static bool chooseEnemies(cube::Game *game, Region region, const Data &value, ui
             if (!module)
                 module = GetModuleHandleW(L"PyroProgression.dll");
             return module ? reinterpret_cast<LevelQuery>(
-                                GetProcAddress(module, "PyroProgressionCreatureLevel")) : nullptr;
+                                GetProcAddress(module, "PyroProgressionCreatureLevel"))
+                          : nullptr;
         }();
         auto playerLevel = game->world->local_creature->entity_data.level;
         int regionalLevel = query ? query(pick) : 1 + 8 * int(pick->entity_data.level);
-        saved.difficultyLevel = std::max(saved.difficultyLevel,
-            unsigned(std::clamp(std::max(int(playerLevel), regionalLevel), 1, 10000000)));
+        saved.difficultyLevel =
+            std::max(saved.difficultyLevel,
+                     unsigned(std::clamp(std::max(int(playerLevel), regionalLevel), 1, 10000000)));
         saved.enemyRaces[index] = pick->entity_data.race;
         saved.enemyStars[index] = stars(int(pick->entity_data.level), leader(saved.kind, index));
     }
@@ -525,6 +533,7 @@ static cube::Creature *spawnActor(Data &value, Active &active, unsigned index,
     IntVector2 region(active.key.region.x, active.key.region.y);
     auto creature = value.bridge.spawn(&point, &region, race, behaviour, stars);
     if (creature) {
+        native::setHome(creature, point);
         active.actors[index] = uint64_t(creature->id);
         value.spawned.insert(uint64_t(creature->id));
     }
@@ -551,11 +560,7 @@ static void noncombatObject(cube::Creature *creature) {
     entity.interaction_state = 1;
 }
 static void setPosition(cube::Creature *creature, const LongVector3 &position) {
-    creature->entity_data.position = position;
-    // The inspected native cage binder also updates the render interpolation
-    // position. These fields fall inside the SDK's still-unnamed gapAC8.
-    static_assert(offsetof(cube::Creature, gapAC8) == 0xac8);
-    std::memcpy(reinterpret_cast<unsigned char *>(creature) + 0xb10, &position, sizeof(position));
+    native::setStationaryPosition(creature, position);
 }
 static void bindRescue(cube::Game *game, const Active &active) {
     auto cage = native::resident(game->host.world, active.actors[Object]);
@@ -955,15 +960,15 @@ static void holdObjects(Data &value, cube::Game *game) {
         for (unsigned index : {Object, Container}) {
             if (!(active.anchoredMask & (1u << index)))
                 continue;
-            auto object = native::resident(game->host.world, active.actors[index]);
-            if (!object || object->entity_data.HP <= 0)
-                continue;
-            auto &entity = object->entity_data;
             const auto &anchor = active.anchors[index];
-            if (entity.position.x != anchor.x || entity.position.y != anchor.y ||
-                entity.position.z != anchor.z)
+            for (auto world : {&game->host.world, game->world}) {
+                auto object = world ? native::resident(*world, active.actors[index]) : nullptr;
+                if (!object || object->entity_data.HP <= 0)
+                    continue;
                 setPosition(object, anchor);
-            entity.velocity = entity.acceleration = entity.retreat = FloatVector3(0, 0, 0);
+                auto &entity = object->entity_data;
+                entity.velocity = entity.acceleration = entity.retreat = FloatVector3(0, 0, 0);
+            }
         }
         const auto *saved = value.state.find(active.key.world, active.key.region, active.key.slot);
         if (saved && !saved->failed && captiveNeedsCage(saved->kind, saved->rewardClaimed))
@@ -1240,9 +1245,17 @@ static void tick(cube::Game *game) {
                 if (!siteAvailable(value.state, referral.objective, candidate.site, now) ||
                     !place(game, candidate, points))
                     continue;
-                if (saved.awaitingSite && !chooseEnemies(game, saved.region, value,
-                        plan(saved.world, saved.region, saved.slot, saved.cycle).roll, candidate))
+                bool aquatic = false;
+                for (unsigned index = 0; index < saved.enemyCount; ++index)
+                    aquatic |= !(saved.defeatedMask & (1u << index)) &&
+                               aquaticRace(value.assets, saved.enemyRaces[index]);
+                if ((saved.awaitingSite || aquatic) &&
+                    !chooseEnemies(game, saved.region, value,
+                                   plan(saved.world, saved.region, saved.slot, saved.cycle).roll,
+                                   candidate, aquatic && !saved.awaitingSite))
                     continue;
+                if (aquatic)
+                    log("Accepted land quest: replaced aquatic enemy templates with regional land enemies.");
                 candidate.awaitingSite = false;
                 saved = candidate;
                 value.dirty = true;
