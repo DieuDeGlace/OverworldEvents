@@ -21,6 +21,25 @@ int main() {
         assert(objects::objectRace(race) == (cage || chest || race == 242));
     }
     assert(objects::nativeKey(22, 6));
+    assert(objects::containerModelHeight(181) == 10);
+    assert(objects::containerModelHeight(184) == 10);
+    assert(objects::containerModelHeight(242) == 11);
+    assert(objects::containerModelHeight(194) == 0);
+    // Half-buried sack and chest regression: both the mesh and collider must
+    // clear the support plane, with only sub-voxel visual clearance.
+    const Position support{100, -50, 7 * objects::FixedPerBlock};
+    auto sack = objects::containerPosition(support, 242, 2.f, 2.f, 2.f, 1.f, 0.f);
+    assert(sack.z - support.z == objects::FixedPerBlock);
+    assert(sack.x == support.x && sack.y == support.y);
+    double sackBottom = double(sack.z - support.z) / objects::FixedPerBlock - 5.5 * 2 / 11.2;
+    assert(sackBottom >= 0 && sackBottom < .02);
+    for (int race = 181; race <= 184; ++race) {
+        auto chest = objects::containerPosition(support, race, 2.f, 2.f, 1.5f, .5f, -1.75f);
+        double lift = double(chest.z - support.z) / objects::FixedPerBlock;
+        assert(lift >= .75 && std::abs(lift - 4.25 * 2 / 11.2) < 1. / objects::FixedPerBlock);
+    }
+    assert(objects::containerFloorOffset(194, 2, 2, 2, 1, 0) == 0);
+    assert(objects::containerFloorOffset(242, 0, 2, 2, 1, 0) == 0);
     assert(!objects::nativeKey(21, 6));
     assert(!objects::nativeKey(22, -1));
     assert(!objects::nativeKey(22, 20));

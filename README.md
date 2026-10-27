@@ -2,7 +2,7 @@
 
 Steam Cube World encounters made by DieuDeGlace with the aid of OpenAI ChatGPT/Codex. MIT licensed; SDK attribution is in THIRD_PARTY_NOTICES.md. Targets CubeModLoader API 7.3 and the inspected Steam executable (timestamp `0x5d93ab0d`, image size `0x5b7000`).
 
-This build passes eleven event-mod tests and six CubeMega bridge tests. Regression coverage includes accepted-quest persistence/migration, dry destination selection, difficulty bounds, and off-screen D3D11 sprite/transparency/state checks. Phone validation confirms native quest dialogue and the grey full-map destination sprite; a complete combat/hand-in run and PC gameplay remain separate live checks.
+This build passes twelve event-mod tests. Regression coverage includes accepted-quest persistence/migration, native actor initialization, object floor clearance, dry destination selection, difficulty bounds, and off-screen D3D11 sprite/transparency/state checks. Phone validation confirms native quest dialogue, native idle wandering and the grey full-map destination sprite; a complete combat/hand-in run and PC gameplay remain separate live checks.
 
 ## Travel locations become dungeons
 
@@ -111,6 +111,8 @@ Check native enemy movement and damage, guardian HP, friendly combat, cage floor
 Quest combatants now receive the vanilla Wander behaviour and a spawn origin for the native 32-block home leash. The companion factory previously selected FollowOwner; merely clearing that bit left no idle actions, and the origin field was uninitialized. These fields were checked against the Steam release reference (World::spawn, AIManager::idle at RVA 0x10b90 and the appearance helper at 0x2b67b0). Native AI chooses movement, combat and animation; this update assigns no animation IDs and adds no custom movement loop.
 
 Static quest objects keep both host and local client simulation/draw positions at the anchor, with remote movement smoothing reset. Previously only the host was held, allowing the client to predict motion away from the server and snap back. Bound captives use the same stationary-position helper.
+
+Sacks and chests also receive a floor offset derived from their native mesh height, body scale/translation and collision half-height. The old position placed their centered origins at the ground surface, burying half the sack and allowing terrain collision to fight the fixed anchor. Both containers now require flat 3x3 support; rescue cages retain their existing flat 7x7 footprint and model-based placement. Native appearance sizes are preserved.
 
 Land encounter selection excludes Steam's Fish appearance flag and dictionary-resolved aquatic species, including SeaCrab and MawFish. They could previously enter the land pool when their instantaneous position was above water or over a dry support column. On loading an accepted unfinished village quest, only aquatic roles not yet defeated are replaced with suitable local land enemies; its destination, kills, health fractions and reward state remain. Native stars and Pyro numeric region levels remain authoritative. The existing bounded quest premiums are unchanged; global HP/damage formulas are not replaced.
 

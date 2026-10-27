@@ -485,7 +485,7 @@ static bool sackPoint(cube::Game *game, const EventRecord &saved, int center, Si
         double angle = double((roll >> 8) % 360) * Pi / 180 + attempt * Pi / 4;
         point = {saved.site.x + int64_t(std::llround(56 * std::cos(angle))),
                  saved.site.y + int64_t(std::llround(56 * std::sin(angle)))};
-        if (native::ground(game->world, point, height, 5) && abs(height - center) <= 24 &&
+        if (footprint(game->world, point, height, 1, true) && abs(height - center) <= 24 &&
             native::overworld(game->world, point, saved.region))
             return true;
     }
@@ -503,7 +503,7 @@ static bool place(cube::Game *game, EventRecord &saved,
     int center = 0;
     if (!allowed(saved.site) ||
         !footprint(game->world, saved.site, center, saved.kind == Kind::Rescue ? 3 : 1,
-                   saved.kind == Kind::Rescue))
+                   saved.kind == Kind::Rescue || chestEvent(saved.kind)))
         return false;
     for (unsigned actor = 0; actor < ActorCount; ++actor) {
         if (!needsPosition(saved, actor))
@@ -561,6 +561,16 @@ static void noncombatObject(cube::Creature *creature) {
 }
 static void setPosition(cube::Creature *creature, const LongVector3 &position) {
     native::setStationaryPosition(creature, position);
+}
+static void placeContainer(cube::Creature *creature, const LongVector3 &floor) {
+    auto &entity = creature->entity_data;
+    const auto &appearance = entity.appearance;
+    entity.pitch = entity.roll = 0.f;
+    setPosition(creature,
+                objects::containerPosition(floor, int(entity.race), appearance.graphics_scale,
+                                           appearance.hitbox_scale, appearance.physics_scale,
+                                           appearance.chest_scale, appearance.chest_position.z));
+    native::setHome(creature, entity.position);
 }
 static void bindRescue(cube::Game *game, const Active &active) {
     auto cage = native::resident(game->host.world, active.actors[Object]);
@@ -764,6 +774,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
             // Native examination objects are excluded from combat targeting and
             // NPC health UI. Keep only positive liveness; this sack carries no gear.
             noncombatObject(sack);
+            placeContainer(sack, points[Container]);
         }
     }
     bool rewardChest = chestEvent(saved.kind) || (landmarkEvent(saved.kind) && saved.objectiveDone);
@@ -772,6 +783,7 @@ static bool spawn(Data &value, cube::Game *game, EventRecord &saved,
                                 objects::ExamineBehaviour, 0);
         if (chest) {
             noncombatObject(chest);
+            placeContainer(chest, points[Object]);
             chest->entity_data.interaction_state = saved.rewardClaimed ? 2 : 1;
         }
     }
